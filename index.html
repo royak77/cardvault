@@ -17,7 +17,7 @@
   input,select,button{font-family:inherit;font-size:14px;}
   input:focus,select:focus{outline:2px solid #c0000a;outline-offset:1px;}
   /* iOS safe area */
-  .safe-top{padding-top:max(env(safe-area-inset-top), 59px);}
+  .safe-top{padding-top:calc(env(safe-area-inset-top) + 12px);}
   .safe-bottom{padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
 </style>
 </head>
@@ -27,9 +27,20 @@
 const {useState,useEffect,useCallback,useMemo,useRef} = React;
 
 // ── Storage (localStorage) ──────────────────────────────────────────────────
-const SK = {packs:"cv-packs",cards:"cv-cards",sales:"cv-sales"};
+const SK = {packs:"cv-packs",cards:"cv-cards",sales:"cv-sales",backups:"cv-backups"};
 function lsGet(k){try{const v=localStorage.getItem(k);return v?JSON.parse(v):[];}catch{return[];}}
 function lsSet(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch{}}
+
+// ── Auto-backup ──────────────────────────────────────────────────────────────
+function takeBackup(packs,cards,sales){
+  const today=todayISO();
+  const existing=lsGet(SK.backups);
+  // Only one snapshot per day -- if today already exists, overwrite it
+  const filtered=existing.filter(b=>b.date!==today);
+  const newSnap={date:today,ts:new Date().toISOString(),packs,cards,sales};
+  const updated=[newSnap,...filtered].slice(0,7); // keep 7 days
+  lsSet(SK.backups,updated);
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 const uid=()=>`${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
@@ -52,8 +63,22 @@ function exportCSV(packs,cards,sales){
   const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download=`cardvault-${todayISO()}.csv`;a.click();
 }
 
+
+// ── PriceCharting deep link ───────────────────────────────────────────────────
+function openPriceCharting(name, tcg){
+  const game = tcg && tcg.toLowerCase().includes("pokemon") ? "pokemon-cards"
+    : tcg && tcg.toLowerCase().includes("magic") ? "magic-the-gathering"
+    : tcg && tcg.toLowerCase().includes("riftbound") ? "other-tcg-cards"
+    : tcg && tcg.toLowerCase().includes("lorcana") ? "disney-lorcana"
+    : tcg && tcg.toLowerCase().includes("yu-gi") ? "yugioh"
+    : tcg && tcg.toLowerCase().includes("one piece") ? "other-tcg-cards"
+    : "other-tcg-cards";
+  const q = encodeURIComponent(name || "");
+  window.open(`https://www.pricecharting.com/search-products?q=${q}&type=prices&genre=${game}`, "_blank");
+}
+
 // ── Tab config ───────────────────────────────────────────────────────────────
-const ACTION_TABS=["Add Pack","Open Pack","Add Single","Log Sale","Trends","History"];
+const ACTION_TABS=["Add Pack","Open Pack","Add Single","Log Sale","Trends","History","Backups"];
 const TAB_META={
   "Add Pack":{icon:"📦",desc:"Log a new sealed or opened pack"},
   "Open Pack":{icon:"🔓",desc:"Rip a sealed pack & log pulls"},
@@ -61,6 +86,8 @@ const TAB_META={
   "Log Sale":{icon:"💰",desc:"Record a card sale & P&L"},
   "Trends":{icon:"📈",desc:"P&L by TCG, set & pack"},
   "History":{icon:"🗂️",desc:"Browse all cards, packs & sales"},
+  "Backups":{icon:"💾",desc:"Auto-saved daily snapshots"},
+
 };
 
 // ── App ──────────────────────────────────────────────────────────────────────
@@ -72,9 +99,9 @@ function App(){
   const [toast,setToast]=useState(null);
 
   const flash=(msg,color="#16a34a")=>{setToast({msg,color});setTimeout(()=>setToast(null),2500);};
-  const savePacks=useCallback(d=>{setPacks(d);lsSet(SK.packs,d);},[]);
-  const saveCards=useCallback(d=>{setCards(d);lsSet(SK.cards,d);},[]);
-  const saveSales=useCallback(d=>{setSales(d);lsSet(SK.sales,d);},[]);
+  const savePacks=useCallback((d,c,s)=>{setPacks(d);lsSet(SK.packs,d);takeBackup(d,c!==undefined?c:cards,s!==undefined?s:sales);},[cards,sales]);
+  const saveCards=useCallback((d,p,s)=>{setCards(d);lsSet(SK.cards,d);takeBackup(p!==undefined?p:packs,d,s!==undefined?s:sales);},[packs,sales]);
+  const saveSales=useCallback((d,p,c)=>{setSales(d);lsSet(SK.sales,d);takeBackup(p!==undefined?p:packs,c!==undefined?c:cards,d);},[packs,cards]);
 
   const stats=useMemo(()=>{
     const totalInvested=packs.reduce((a,p)=>a+p.costPaid,0);
@@ -95,7 +122,7 @@ function App(){
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <span style={{fontSize:26}}>🃏</span>
             <div>
-              <div style={S.brandName}>CardVault</div>
+              <div style={S.brandName}>CardVault <span style={{fontSize:11,fontWeight:500,opacity:0.7}}>v1.4.0</span></div>
               <div style={S.brandSub}>TCG Collection Tracker</div>
             </div>
           </div>
@@ -131,6 +158,7 @@ function App(){
         {tab==="Log Sale"&&<LogSale cards={cards} sales={sales} saveCards={saveCards} saveSales={saveSales} flash={flash}/>}
         {tab==="Trends"&&<Trends packs={packs} cards={cards} sales={sales}/>}
         {tab==="History"&&<History packs={packs} cards={cards} sales={sales} savePacks={savePacks} saveCards={saveCards} saveSales={saveSales} flash={flash}/>}
+        {tab==="Backups"&&<Backups setPacks={setPacks} setCards={setCards} setSales={setSales} flash={flash}/>}
       </div>
     </div>
   );
@@ -272,20 +300,163 @@ function OpenPack({packs,cards,savePacks,saveCards,flash}){
 
 // ── Add Single ───────────────────────────────────────────────────────────────
 function AddSingle({cards,saveCards,flash}){
-  const blank={title:"",tcg:"",set:"",datePurchased:todayISO(),costPaid:"",location:"",currentValue:"",notes:""};
+  const blank={title:"",tcg:"",set:"",rarity:"",faction:"",cardType:"",collectorNumber:"",keywords:"",datePurchased:todayISO(),costPaid:"",location:"",currentValue:"",notes:""};
   const [form,setForm]=useState(blank);
+  const [query,setQuery]=useState("");
+  const [results,setResults]=useState([]);
+  const [searching,setSearching]=useState(false);
+  const [selected,setSelected]=useState(false);
+  const debounceRef=useRef(null);
   const f=(k,v)=>setForm(p=>({...p,[k]:v}));
+
+  // Search ApiTCG Riftbound — matches on name or collector number
+  const search=async(q)=>{
+    if(!q||q.length<2){setResults([]);return;}
+    setSearching(true);
+    try{
+      // Try name search first
+      const nameRes=await fetch(`https://apitcg.com/api/riftbound/cards?name=${encodeURIComponent(q)}`);
+      const nameData=await nameRes.json();
+      let hits=(nameData.data||[]);
+      // Also try code/id search if query looks like a number or code (e.g. "032", "SFD-032", "SFD032")
+      if(/^[a-zA-Z0-9\-]+$/.test(q)&&hits.length<5){
+        try{
+          const codeRes=await fetch(`https://apitcg.com/api/riftbound/cards?code=${encodeURIComponent(q)}`);
+          const codeData=await codeRes.json();
+          const codeHits=(codeData.data||[]).filter(c=>!hits.some(h=>h.id===c.id));
+          hits=[...hits,...codeHits];
+        }catch{}
+      }
+      setResults(hits.slice(0,8));
+    }catch{setResults([]);}
+    setSearching(false);
+  };
+
+  const onQueryChange=(v)=>{
+    setQuery(v);
+    setSelected(false);
+    clearTimeout(debounceRef.current);
+    debounceRef.current=setTimeout(()=>search(v),350);
+  };
+
+  const selectCard=(card)=>{
+    // Parse collector number — e.g. id "SFD-032" -> "SFD 032"
+    const rawId=card.id||card.code||"";
+    const collNum=rawId.replace(/-/g," ").toUpperCase();
+    // Build total from set if available e.g. "SFD 032/221"
+    const total=card.set?.total||card.setTotal||"";
+    const displayNum=total?`${collNum}/${total}`:collNum;
+    setForm(p=>({
+      ...p,
+      title:card.name||"",
+      tcg:"Riftbound",
+      set:card.set?.name||card.set||"",
+      rarity:card.rarity||"",
+      faction:card.faction||"",
+      cardType:card.type||"",
+      collectorNumber:displayNum,
+      keywords:(card.keywords||[]).join(", "),
+    }));
+    setQuery(card.name||"");
+    setResults([]);
+    setSelected(true);
+  };
+
   const submit=()=>{
     if(!form.title||!form.tcg||!form.costPaid)return;
-    const card={id:uid(),title:form.title,tcg:form.tcg,set:form.set,sourceType:"single",packId:null,packName:null,costBasis:parseFloat(form.costPaid),currentValue:form.currentValue?parseFloat(form.currentValue):null,status:"holding",dateAcquired:form.datePurchased,location:form.location,notes:form.notes};
-    saveCards([card,...cards]);setForm(blank);flash("Single added!");
+    const card={
+      id:uid(),title:form.title,tcg:form.tcg,set:form.set,
+      rarity:form.rarity,faction:form.faction,cardType:form.cardType,
+      collectorNumber:form.collectorNumber,keywords:form.keywords,
+      sourceType:"single",packId:null,packName:null,
+      costBasis:parseFloat(form.costPaid),
+      currentValue:form.currentValue?parseFloat(form.currentValue):null,
+      status:"holding",dateAcquired:form.datePurchased,
+      location:form.location,notes:form.notes
+    };
+    saveCards([card,...cards]);
+    setForm(blank);setQuery("");setSelected(false);setResults([]);
+    flash("Single added!");
   };
+
+  const rarityColor=(r)=>{
+    if(!r)return"#6b7280";
+    const rl=r.toLowerCase();
+    if(rl.includes("epic"))return"#7c3aed";
+    if(rl.includes("rare"))return"#d97706";
+    if(rl.includes("uncommon"))return"#6b7280";
+    return"#9ca3af";
+  };
+
   return(
     <FormWrap title="Add a Single">
-      <FField label="Card Title *"><input style={S.input} placeholder="e.g. Charizard Holo..." value={form.title} onChange={e=>f("title",e.target.value)}/></FField>
+      {/* Riftbound card search */}
+      <FField label="Search Riftbound Card (name or card number)">
+        <div style={{position:"relative"}}>
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <input
+              style={{...S.input,flex:1,borderColor:selected?"#c0000a":"#d1d5db"}}
+              placeholder="e.g. Rek'Sai or SFD 032..."
+              value={query}
+              onChange={e=>onQueryChange(e.target.value)}
+            />
+            {searching&&<span style={{fontSize:12,color:"#9ca3af",flexShrink:0}}>🔍</span>}
+            {selected&&<span style={{fontSize:12,color:"#c0000a",flexShrink:0}}>✓</span>}
+          </div>
+          {results.length>0&&(
+            <div style={{position:"absolute",top:"100%",left:0,right:0,background:"#fff",border:"1px solid #e5e7eb",borderRadius:10,zIndex:200,maxHeight:280,overflowY:"auto",marginTop:4,boxShadow:"0 8px 24px rgba(0,0,0,0.12)"}}>
+              {results.map(card=>(
+                <div key={card.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderBottom:"1px solid #f9f9f9",cursor:"pointer"}}
+                  onMouseDown={()=>selectCard(card)} onTouchEnd={()=>selectCard(card)}>
+                  {card.images?.small&&(
+                    <img src={card.images.small} alt={card.name} style={{width:32,height:44,objectFit:"cover",borderRadius:4,flexShrink:0}} onError={e=>e.target.style.display="none"}/>
+                  )}
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontWeight:700,fontSize:13,color:"#111827",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{card.name}</div>
+                    <div style={{fontSize:11,color:"#9ca3af",marginTop:1,display:"flex",gap:8,flexWrap:"wrap"}}>
+                      <span>{card.set?.name||card.set||""}</span>
+                      {card.rarity&&<span style={{color:rarityColor(card.rarity),fontWeight:600}}>{card.rarity}</span>}
+                      {card.faction&&<span>{card.faction}</span>}
+                    </div>
+                  </div>
+                  <div style={{fontSize:11,color:"#d1d5db",flexShrink:0}}>{(card.id||"").replace(/-/g," ")}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div style={{fontSize:11,color:"#9ca3af",marginTop:4}}>Tap a result to auto-fill. Or skip and fill manually below.</div>
+      </FField>
+
+      {/* Auto-filled metadata preview */}
+      {selected&&(
+        <div style={{...S.allocBox,borderColor:"#c0000a"}}>
+          <div style={S.allocTitle}>Card Metadata</div>
+          <div style={{display:"flex",gap:12,flexWrap:"wrap",fontSize:12,color:"#374151"}}>
+            {form.collectorNumber&&<span>🔢 <b>{form.collectorNumber}</b></span>}
+            {form.rarity&&<span style={{color:rarityColor(form.rarity)}}>◆ <b>{form.rarity}</b></span>}
+            {form.faction&&<span>⚔️ {form.faction}</span>}
+            {form.cardType&&<span>📋 {form.cardType}</span>}
+            {form.keywords&&<span>🏷️ {form.keywords}</span>}
+          </div>
+        </div>
+      )}
+
+      {/* Manual fields */}
+      <FField label="Card Title *">
+        <input style={S.input} placeholder="e.g. Charizard Holo, Rek'Sai..." value={form.title} onChange={e=>f("title",e.target.value)}/>
+      </FField>
       <Row2>
         <FField label="TCG *"><Combo value={form.tcg} onChange={v=>f("tcg",v)} options={TCGS} placeholder="TCG..."/></FField>
         <FField label="Set"><input style={S.input} placeholder="Set name..." value={form.set} onChange={e=>f("set",e.target.value)}/></FField>
+      </Row2>
+      <Row2>
+        <FField label="Collector # (e.g. SFD 032/221)">
+          <input style={S.input} placeholder="SFD 032/221" value={form.collectorNumber} onChange={e=>f("collectorNumber",e.target.value)}/>
+        </FField>
+        <FField label="Rarity">
+          <input style={S.input} placeholder="Common, Rare..." value={form.rarity} onChange={e=>f("rarity",e.target.value)}/>
+        </FField>
       </Row2>
       <Row2>
         <FField label="Date"><input type="date" style={S.input} value={form.datePurchased} onChange={e=>f("datePurchased",e.target.value)}/></FField>
@@ -295,7 +466,7 @@ function AddSingle({cards,saveCards,flash}){
         <FField label="Cost Paid ($) *"><input type="number" step="0.01" style={S.input} placeholder="0.00" value={form.costPaid} onChange={e=>f("costPaid",e.target.value)}/></FField>
         <FField label="Est. Value ($)"><input type="number" step="0.01" style={S.input} placeholder="0.00" value={form.currentValue} onChange={e=>f("currentValue",e.target.value)}/></FField>
       </Row2>
-      <FField label="Notes"><input style={S.input} placeholder="Condition, grade..." value={form.notes} onChange={e=>f("notes",e.target.value)}/></FField>
+      <FField label="Notes"><input style={S.input} placeholder="Condition, grade, foil..." value={form.notes} onChange={e=>f("notes",e.target.value)}/></FField>
       <SubmitBtn onClick={submit} disabled={!form.title||!form.tcg||!form.costPaid}>Add Single</SubmitBtn>
     </FormWrap>
   );
@@ -447,11 +618,17 @@ function History({packs,cards,sales,savePacks,saveCards,saveSales,flash}){
               <div style={{fontSize:11,color:"#9ca3af",marginTop:3,display:"flex",gap:10,flexWrap:"wrap"}}>
                 <span>Cost: {fmt$(c.costBasis)}</span>
                 {c.currentValue&&<span>Est: {fmt$(c.currentValue)}</span>}
+                {c.collectorNumber&&<span style={{color:"#6b7280"}}>🔢 {c.collectorNumber}</span>}
+                {c.rarity&&<span style={{color:"#d97706"}}>{c.rarity}</span>}
+                {c.faction&&<span>{c.faction}</span>}
                 {c.sourceType==="pack-pull"&&<span style={{color:"#7c3aed"}}>📦 {c.packName}</span>}
                 <span>{fmtDate(c.dateAcquired)}</span>
               </div>
             </div>
-            <button onClick={()=>delCard(c.id)} style={S.delBtn}>✕</button>
+            <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-end"}}>
+              <button onClick={()=>openPriceCharting(c.title,c.tcg)} style={S.pcBtn} title="Check PriceCharting">💲</button>
+              <button onClick={()=>delCard(c.id)} style={S.delBtn}>✕</button>
+            </div>
           </div>
         ))}</div>
       )}
@@ -488,7 +665,10 @@ function PackRow({p,onDelete}){
           <div style={{fontWeight:700,color:"#c0000a",fontSize:14}}>{fmt$(p.costPaid)}</div>
           {sPL!==null&&<div style={{fontSize:12,color:clr(sPL)}}>{sPL>=0?"+":""}{fmt$(sPL)}</div>}
         </div>
-        {onDelete&&<button onClick={onDelete} style={S.delBtn}>✕</button>}
+        <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-end"}}>
+          <button onClick={()=>openPriceCharting(p.name,p.tcg)} style={S.pcBtn} title="Check PriceCharting">💲</button>
+          {onDelete&&<button onClick={onDelete} style={S.delBtn}>✕</button>}
+        </div>
       </div>
     </div>
   );
@@ -514,6 +694,64 @@ function SaleRow({s,cards,onDelete}){
         <div style={{fontWeight:700,fontSize:15,color:clr(pl)}}>{pl>=0?"+":""}{fmt$(pl)}</div>
         {onDelete&&<button onClick={onDelete} style={S.delBtn}>✕</button>}
       </div>
+    </div>
+  );
+}
+
+
+// ── Backups ───────────────────────────────────────────────────────────────────
+function Backups({setPacks,setCards,setSales,flash}){
+  const [backups,setBackups]=useState(()=>lsGet(SK.backups));
+  const [confirming,setConfirming]=useState(null);
+
+  const restore=(snap)=>{
+    setPacks(snap.packs);lsSet(SK.packs,snap.packs);
+    setCards(snap.cards);lsSet(SK.cards,snap.cards);
+    setSales(snap.sales);lsSet(SK.sales,snap.sales);
+    setConfirming(null);
+    flash("Restored from "+fmtDate(snap.date)+"!","#7c3aed");
+  };
+
+  const deleteBackup=(date)=>{
+    const updated=backups.filter(b=>b.date!==date);
+    setBackups(updated);lsSet(SK.backups,updated);
+  };
+
+  if(backups.length===0) return <Empty msg="No backups yet — they appear automatically as you log data."/>;
+
+  return(
+    <div>
+      <Section title={"Auto-Backups ("+backups.length+" of 7 days)"}>
+        <div style={{fontSize:12,color:"#9ca3af",marginBottom:12}}>Snapshots are saved automatically every time you add or change data. Up to 7 daily snapshots are kept.</div>
+        <div style={S.listWrap}>
+          {backups.map(snap=>(
+            <div key={snap.date} style={S.row}>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:14,color:"#111827"}}>📅 {fmtDate(snap.date)}</div>
+                <div style={{fontSize:12,color:"#9ca3af",marginTop:3,display:"flex",gap:12,flexWrap:"wrap"}}>
+                  <span>{snap.packs.length} packs</span>
+                  <span>{snap.cards.length} cards</span>
+                  <span>{snap.sales.length} sales</span>
+                  <span style={{color:"#64748b"}}>{new Date(snap.ts).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>
+                </div>
+              </div>
+              <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                {confirming===snap.date?(
+                  <>
+                    <button onClick={()=>restore(snap)} style={{...S.typeBtn,...S.typeBtnOn,fontSize:12}}>Confirm</button>
+                    <button onClick={()=>setConfirming(null)} style={{...S.typeBtn,fontSize:12}}>Cancel</button>
+                  </>
+                ):(
+                  <>
+                    <button onClick={()=>setConfirming(snap.date)} style={{...S.typeBtn,fontSize:12,color:"#7c3aed",borderColor:"#c4b5fd"}}>Restore</button>
+                    <button onClick={()=>deleteBackup(snap.date)} style={S.delBtn}>✕</button>
+                  </>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Section>
     </div>
   );
 }
@@ -567,7 +805,7 @@ function Empty({msg}){return <div style={{color:"#9ca3af",fontSize:13,padding:"2
 // ── Styles ────────────────────────────────────────────────────────────────────
 const S={
   root:{fontFamily:"'DM Sans','Segoe UI',sans-serif",background:"#f9f9f9",minHeight:"100vh",color:"#111827"},
-  header:{background:"linear-gradient(135deg,#c0000a 0%,#7f0006 100%)",padding:"59px 16px 12px 16px",borderBottom:"3px solid #9b0008"},
+  header:{background:"linear-gradient(135deg,#c0000a 0%,#7f0006 100%)",padding:"16px 16px 12px",borderBottom:"3px solid #9b0008"},
   headerInner:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12},
   brandName:{fontSize:20,fontWeight:900,letterSpacing:"-0.5px",color:"#fff"},
   brandSub:{fontSize:10,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",letterSpacing:"0.8px"},
@@ -597,6 +835,7 @@ const S={
   allocTitle:{fontSize:10,fontWeight:700,color:"#c0000a",textTransform:"uppercase",letterSpacing:"0.5px",marginBottom:5},
   allocRow:{display:"flex",gap:16,flexWrap:"wrap",fontSize:12,color:"#6b7280"},
   delBtn:{background:"none",border:"none",color:"#d1d5db",cursor:"pointer",fontSize:14,padding:"4px 6px",borderRadius:5,flexShrink:0},
+  pcBtn:{background:"#fff7f7",border:"1px solid #fecaca",color:"#c0000a",cursor:"pointer",fontSize:12,padding:"3px 7px",borderRadius:6,flexShrink:0,fontWeight:700},
   dropdown:{position:"absolute",top:"100%",left:0,right:0,background:"#fff",border:"1px solid #d1d5db",borderRadius:8,zIndex:100,maxHeight:160,overflowY:"auto",marginTop:2,boxShadow:"0 4px 16px rgba(0,0,0,0.1)"},
   dropdownItem:{padding:"10px 12px",cursor:"pointer",fontSize:13,color:"#111827",borderBottom:"1px solid #f9f9f9"},
 };
