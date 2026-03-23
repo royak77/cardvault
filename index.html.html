@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="CardVault"/>
+<meta name="theme-color" content="#c0000a"/>
+<title>CardVault</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  body{margin:0;padding:0;font-family:'DM Sans','Segoe UI',sans-serif;background:#f9f9f9;overscroll-behavior:none;}
+  input,select,button{font-family:inherit;font-size:14px;}
+  input:focus,select:focus{outline:2px solid #c0000a;outline-offset:1px;}
+  /* iOS safe area */
+  .safe-top{padding-top:calc(env(safe-area-inset-top) + 12px);}
+  .safe-bottom{padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useCallback,useMemo,useRef} = React;
+
+// ── Storage (localStorage) ──────────────────────────────────────────────────
+const SK = {packs:"cv-packs",cards:"cv-cards",sales:"cv-sales",backups:"cv-backups"};
+function lsGet(k){try{const v=localStorage.getItem(k);return v?JSON.parse(v):[];}catch{return[];}}
+function lsSet(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch{}}
+
+// ── Auto-backup ──────────────────────────────────────────────────────────────
+function takeBackup(packs,cards,sales){
+  const today=todayISO();
+  const existing=lsGet(SK.backups);
+  // Only one snapshot per day -- if today already exists, overwrite it
+  const filtered=existing.filter(b=>b.date!==today);
+  const newSnap={date:today,ts:new Date().toISOString(),packs,cards,sales};
+  const updated=[newSnap,...filtered].slice(0,7); // keep 7 days
+  lsSet(SK.backups,updated);
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+const uid=()=>`${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
+const todayISO=()=>new Date().toISOString().split("T")[0];
+const fmt$=v=>new Intl.NumberFormat("en-US",{style:"currency",currency:"USD"}).format(v||0);
+const fmtDate=iso=>{if(!iso)return"";const[y,m,d]=iso.split("-");return`${m}/${d}/${y}`;};
+const clr=v=>v>0?"#16a34a":v<0?"#dc2626":"#6b7280";
+const TCGS=["Pokemon","Riftbound","Magic: The Gathering","One Piece","Lorcana","Yu-Gi-Oh!","Sports","Other"];
+
+// ── Export ───────────────────────────────────────────────────────────────────
+function exportJSON(packs,cards,sales){
+  const blob=new Blob([JSON.stringify({exported:new Date().toISOString(),packs,cards,sales},null,2)],{type:"application/json"});
+  const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`cardvault-${todayISO()}.json`;a.click();
+}
+function exportCSV(packs,cards,sales){
+  const cR=[["CARDS"],["ID","Title","TCG","Set","Source","Pack","Cost","Value","Status","Date","Notes"],...cards.map(c=>[c.id,c.title,c.tcg,c.set,c.sourceType,c.packId||"",fmt$(c.costBasis),fmt$(c.currentValue||0),c.status,c.dateAcquired,c.notes||""])];
+  const pR=[["PACKS"],["ID","TCG","Set","Name","Status","Date","Cost","Market","Location","Cards","Notes"],...packs.map(p=>[p.id,p.tcg,p.set,p.name,p.status,p.datePurchased,fmt$(p.costPaid),fmt$(p.marketValue||0),p.location||"",p.cardCount||"",p.notes||""])];
+  const sR=[["SALES"],["ID","Card","TCG","Set","Date","Sale","Cost","P&L","Platform","Notes"],...sales.map(s=>{const pl=s.salePrice-s.costBasis;return[s.id,s.cardTitle,s.tcg||"",s.set||"",s.dateSold,fmt$(s.salePrice),fmt$(s.costBasis),fmt$(pl),s.platform||"",s.notes||""];})];
+  const csv=[...cR,[],...pR,[],...sR].map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
+  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download=`cardvault-${todayISO()}.csv`;a.click();
+}
+
+
+// ── PriceCharting deep link ───────────────────────────────────────────────────
+function openPriceCharting(name, tcg){
+  const game = tcg && tcg.toLowerCase().includes("pokemon") ? "pokemon-cards"
+    : tcg && tcg.toLowerCase().includes("magic") ? "magic-the-gathering"
+    : tcg && tcg.toLowerCase().includes("riftbound") ? "other-tcg-cards"
+    : tcg && tcg.toLowerCase().includes("lorcana") ? "disney-lorcana"
+    : tcg && tcg.toLowerCase().includes("yu-gi") ? "yugioh"
+    : tcg && tcg.toLowerCase().includes("one piece") ? "other-tcg-cards"
+    : "other-tcg-cards";
+  const q = encodeURIComponent(name || "");
+  window.open(`https://www.pricecharting.com/search-products?q=${q}&type=prices&genre=${game}`, "_blank");
+}
+
+// ── Tab config ───────────────────────────────────────────────────────────────
+const ACTION_TABS=["Add Pack","Open Pack","Add Single","Log Sale","Trends","History","Backups"];
+const TAB_META={
+  "Add Pack":{icon:"📦",desc:"Log a new sealed or opened pack"},
+  "Open Pack":{icon:"🔓",desc:"Rip a sealed pack & log pulls"},
+  "Add Single":{icon:"🃏",desc:"Add a single card purchase"},
+  "Log Sale":{icon:"💰",desc:"Record a card sale & P&L"},
+  "Trends":{icon:"📈",desc:"P&L by TCG, set & pack"},
+  "History":{icon:"🗂️",desc:"Browse all cards, packs & sales"},
+  "Backups":{icon:"💾",desc:"Auto-saved daily snapshots"},
+
+};
+
+// ── App ──────────────────────────────────────────────────────────────────────
+function App(){
+  const [packs,setPacks]=useState(()=>lsGet(SK.packs));
+  const [cards,setCards]=useState(()=>lsGet(SK.cards));
+  const [sales,setSales]=useState(()=>lsGet(SK.sales));
+  const [tab,setTab]=useState("Dashboard");
+  const [toast,setToast]=useState(null);
+
+  const flash=(msg,color="#16a34a")=>{setToast({msg,color});setTimeout(()=>setToast(null),2500);};
+  const savePacks=useCallback((d,c,s)=>{setPacks(d);lsSet(SK.packs,d);takeBackup(d,c!==undefined?c:cards,s!==undefined?s:sales);},[cards,sales]);
+  const saveCards=useCallback((d,p,s)=>{setCards(d);lsSet(SK.cards,d);takeBackup(p!==undefined?p:packs,d,s!==undefined?s:sales);},[packs,sales]);
+  const saveSales=useCallback((d,p,c)=>{setSales(d);lsSet(SK.sales,d);takeBackup(p!==undefined?p:packs,c!==undefined?c:cards,d);},[packs,cards]);
+
+  const stats=useMemo(()=>{
+    const totalInvested=packs.reduce((a,p)=>a+p.costPaid,0);
+    const totalSaleRevenue=sales.reduce((a,s)=>a+s.salePrice,0);
+    const totalCostSold=sales.reduce((a,s)=>a+s.costBasis,0);
+    const realizedPL=totalSaleRevenue-totalCostSold;
+    const sealedValue=packs.filter(p=>p.status==="sealed").reduce((a,p)=>a+(p.marketValue||p.costPaid),0);
+    const sealedCost=packs.filter(p=>p.status==="sealed").reduce((a,p)=>a+p.costPaid,0);
+    const cardCount=cards.filter(c=>c.status==="holding").length;
+    return{totalInvested,totalSaleRevenue,realizedPL,sealedValue,sealedCost,cardCount};
+  },[packs,cards,sales]);
+
+  return(
+    <div style={S.root}>
+      {/* Red header */}
+      <div style={S.header} className="safe-top">
+        <div style={S.headerInner}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontSize:26}}>🃏</span>
+            <div>
+              <div style={S.brandName}>CardVault <span style={{fontSize:11,fontWeight:500,opacity:0.7}}>v1.4.0</span></div>
+              <div style={S.brandSub}>TCG Collection Tracker</div>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:6}}>
+            <button style={S.exportBtn} onClick={()=>exportCSV(packs,cards,sales)}>↓ CSV</button>
+            <button style={S.exportBtn} onClick={()=>exportJSON(packs,cards,sales)}>↓ JSON</button>
+          </div>
+        </div>
+        <div style={S.statBar}>
+          <Stat label="Invested" value={fmt$(stats.totalInvested)}/>
+          <Stat label="P&L" value={fmt$(stats.realizedPL)} dim={stats.realizedPL<0}/>
+          <Stat label="Sealed" value={fmt$(stats.sealedValue)}/>
+          <Stat label="Cards Held" value={stats.cardCount}/>
+          <Stat label="Sales" value={fmt$(stats.totalSaleRevenue)}/>
+        </div>
+      </div>
+
+      {/* Rail */}
+      <div style={S.rail}>
+        <button style={{...S.railBtn,...(tab==="Dashboard"?S.railBtnActive:{})}} onClick={()=>setTab("Dashboard")}>🏠 Dashboard</button>
+        {tab!=="Dashboard"&&<><span style={S.railSep}>›</span><span style={S.railCrumb}>{TAB_META[tab]?.icon} {tab}</span></>}
+      </div>
+
+      {/* Toast */}
+      {toast&&<div style={{position:"fixed",top:60,left:"50%",transform:"translateX(-50%)",background:toast.color,color:"#fff",padding:"10px 20px",borderRadius:20,fontWeight:700,fontSize:13,zIndex:999,boxShadow:"0 4px 20px rgba(0,0,0,0.2)",whiteSpace:"nowrap"}}>{toast.msg}</div>}
+
+      {/* Content */}
+      <div style={S.main} className="safe-bottom">
+        {tab==="Dashboard"&&<Dashboard packs={packs} cards={cards} sales={sales} stats={stats} setTab={setTab}/>}
+        {tab==="Add Pack"&&<AddPack packs={packs} savePacks={savePacks} flash={flash}/>}
+        {tab==="Open Pack"&&<OpenPack packs={packs} cards={cards} savePacks={savePacks} saveCards={saveCards} flash={flash}/>}
+        {tab==="Add Single"&&<AddSingle cards={cards} saveCards={saveCards} flash={flash}/>}
+        {tab==="Log Sale"&&<LogSale cards={cards} sales={sales} saveCards={saveCards} saveSales={saveSales} flash={flash}/>}
+        {tab==="Trends"&&<Trends packs={packs} cards={cards} sales={sales}/>}
+        {tab==="History"&&<History packs={packs} cards={cards} sales={sales} savePacks={savePacks} saveCards={saveCards} saveSales={saveSales} flash={flash}/>}
+        {tab==="Backups"&&<Backups setPacks={setPacks} setCards={setCards} setSales={setSales} flash={flash}/>}
+      </div>
+    </div>
+  );
+}
+
+// ── Dashboard ────────────────────────────────────────────────────────────────
+function Dashboard({packs,cards,sales,stats,setTab}){
+  const recentPacks=[...packs].sort((a,b)=>b.datePurchased>a.datePurchased?1:-1).slice(0,4);
+  const recentSales=[...sales].sort((a,b)=>b.dateSold>a.dateSold?1:-1).slice(0,3);
+  const sealedPacks=packs.filter(p=>p.status==="sealed");
+  return(
+    <div>
+      <Section title="Quick Actions">
+        <div style={S.actionGrid}>
+          {ACTION_TABS.map(t=>(
+            <button key={t} style={S.actionBtn} onClick={()=>setTab(t)}>
+              <div style={{fontSize:22,marginBottom:6}}>{TAB_META[t].icon}</div>
+              <div style={{fontWeight:700,fontSize:13,color:"#111827",marginBottom:2}}>{t}</div>
+              <div style={{fontSize:11,color:"#9ca3af",lineHeight:1.3}}>{TAB_META[t].desc}</div>
+            </button>
+          ))}
+        </div>
+      </Section>
+      {sealedPacks.length>0&&<Section title="Sealed Holdings"><div style={S.listWrap}>{sealedPacks.map(p=><PackRow key={p.id} p={p}/>)}</div></Section>}
+      <Section title="Recent Packs">
+        {packs.length===0?<Empty msg="No packs yet — tap 'Add Pack' to start."/>:<div style={S.listWrap}>{recentPacks.map(p=><PackRow key={p.id} p={p}/>)}</div>}
+      </Section>
+      {recentSales.length>0&&<Section title="Recent Sales"><div style={S.listWrap}>{recentSales.map(s=><SaleRow key={s.id} s={s} cards={cards}/>)}</div></Section>}
+    </div>
+  );
+}
+
+// ── Add Pack ─────────────────────────────────────────────────────────────────
+function AddPack({packs,savePacks,flash}){
+  const blank={name:"",tcg:"",set:"",status:"sealed",datePurchased:todayISO(),costPaid:"",cardCount:"",location:"",marketValue:"",notes:""};
+  const [form,setForm]=useState(blank);
+  const f=(k,v)=>setForm(p=>({...p,[k]:v}));
+  const submit=()=>{
+    if(!form.name||!form.tcg||!form.costPaid)return;
+    const pack={...form,id:uid(),costPaid:parseFloat(form.costPaid),cardCount:parseInt(form.cardCount)||null,marketValue:form.marketValue?parseFloat(form.marketValue):null};
+    savePacks([pack,...packs]);setForm(blank);flash("Pack added!");
+  };
+  return(
+    <FormWrap title="Add a Pack">
+      <Row2>
+        <FField label="TCG *"><Combo value={form.tcg} onChange={v=>f("tcg",v)} options={TCGS} placeholder="Select TCG..."/></FField>
+        <FField label="Set *"><input style={S.input} placeholder="e.g. Mega Evolution" value={form.set} onChange={e=>f("set",e.target.value)}/></FField>
+      </Row2>
+      <FField label="Pack Name *"><input style={S.input} placeholder="Full pack name..." value={form.name} onChange={e=>f("name",e.target.value)}/></FField>
+      <Row2>
+        <FField label="Status">
+          <div style={S.typeRow}>
+            {["sealed","opened"].map(s=><button key={s} style={{...S.typeBtn,...(form.status===s?S.typeBtnOn:{})}} onClick={()=>f("status",s)}>{s==="sealed"?"📦 Sealed":"🔓 Opened"}</button>)}
+          </div>
+        </FField>
+        <FField label="Date"><input type="date" style={S.input} value={form.datePurchased} onChange={e=>f("datePurchased",e.target.value)}/></FField>
+      </Row2>
+      <Row2>
+        <FField label="Cost Paid ($) *"><input type="number" step="0.01" style={S.input} placeholder="0.00" value={form.costPaid} onChange={e=>f("costPaid",e.target.value)}/></FField>
+        <FField label="Cards in Pack"><input type="number" style={S.input} placeholder="10" value={form.cardCount} onChange={e=>f("cardCount",e.target.value)}/></FField>
+      </Row2>
+      <Row2>
+        <FField label="Location"><input style={S.input} placeholder="Target, eBay..." value={form.location} onChange={e=>f("location",e.target.value)}/></FField>
+        <FField label="Market Value ($)"><input type="number" step="0.01" style={S.input} placeholder="0.00" value={form.marketValue} onChange={e=>f("marketValue",e.target.value)}/></FField>
+      </Row2>
+      <FField label="Notes"><input style={S.input} placeholder="Condition, notes..." value={form.notes} onChange={e=>f("notes",e.target.value)}/></FField>
+      <SubmitBtn onClick={submit} disabled={!form.name||!form.tcg||!form.costPaid}>Add Pack</SubmitBtn>
+    </FormWrap>
+  );
+}
+
+// ── Open Pack ────────────────────────────────────────────────────────────────
+function OpenPack({packs,cards,savePacks,saveCards,flash}){
+  const sealedPacks=packs.filter(p=>p.status==="sealed");
+  const [selId,setSelId]=useState("");
+  const [pulls,setPulls]=useState([]);
+  const [cardCount,setCardCount]=useState("");
+  const sel=packs.find(p=>p.id===selId);
+  const eff=parseInt(cardCount)||sel?.cardCount||0;
+  const cpp=sel&&eff>0?(sel.costPaid/eff).toFixed(2):null;
+  const initPulls=n=>{const c=parseInt(n)||0;setPulls(Array.from({length:c},()=>({id:uid(),title:"",notes:"",currentValue:""})));};
+  const upd=(i,k,v)=>setPulls(prev=>prev.map((p,idx)=>idx===i?{...p,[k]:v}:p));
+  const submit=()=>{
+    if(!sel||pulls.length===0)return;
+    const basis=parseFloat(cpp)||0;
+    const nc=pulls.map(pull=>({id:uid(),title:pull.title||`Card from ${sel.name}`,tcg:sel.tcg,set:sel.set,sourceType:"pack-pull",packId:sel.id,packName:sel.name,costBasis:basis,currentValue:pull.currentValue?parseFloat(pull.currentValue):null,status:"holding",dateAcquired:sel.datePurchased,notes:pull.notes||""}));
+    savePacks(packs.map(p=>p.id===sel.id?{...p,status:"opened",cardCount:pulls.length}:p));
+    saveCards([...nc,...cards]);
+    setSelId("");setPulls([]);setCardCount("");
+    flash(`Opened! ${nc.length} cards @ ${fmt$(basis)} each.`);
+  };
+  return(
+    <FormWrap title="Open a Pack">
+      {sealedPacks.length===0?<Empty msg="No sealed packs — add one first!"/>:<>
+        <FField label="Select Sealed Pack">
+          <select style={S.input} value={selId} onChange={e=>{setSelId(e.target.value);setPulls([]);setCardCount("");}}>
+            <option value="">— choose a pack —</option>
+            {sealedPacks.map(p=><option key={p.id} value={p.id}>{p.tcg} · {p.set} · {p.name} ({fmt$(p.costPaid)})</option>)}
+          </select>
+        </FField>
+        {sel&&<>
+          <div style={S.allocBox}>
+            <div style={S.allocTitle}>Cost Allocation</div>
+            <div style={S.allocRow}>
+              <span>Cost: <b>{fmt$(sel.costPaid)}</b></span>
+              <span>Cards: <b>{eff||"?"}</b></span>
+              <span>Each: <b style={{color:"#c0000a"}}>{cpp?fmt$(cpp):"—"}</b></span>
+            </div>
+          </div>
+          <Row2>
+            <FField label="Cards Pulled">
+              <input type="number" style={S.input} placeholder={sel.cardCount||"10"} value={cardCount} onChange={e=>{setCardCount(e.target.value);initPulls(e.target.value);}}/>
+            </FField>
+            <div style={{display:"flex",alignItems:"flex-end"}}>
+              <button style={{...S.btn,background:"#f3f4f6",color:"#374151",border:"1px solid #d1d5db",fontSize:13}} onClick={()=>initPulls(cardCount||sel?.cardCount||10)}>Set Up Sheet</button>
+            </div>
+          </Row2>
+          {pulls.length>0&&<>
+            <div style={{borderTop:"1px solid #fee2e2",paddingTop:10}}>
+              <span style={{color:"#9ca3af",fontSize:12}}># · Title · Est. Value · Notes</span>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {pulls.map((pull,i)=>(
+                <div key={pull.id} style={{display:"flex",gap:6,alignItems:"center"}}>
+                  <div style={{width:20,fontSize:11,color:"#c0000a",fontWeight:800,flexShrink:0,textAlign:"right"}}>{i+1}</div>
+                  <input style={{...S.input,flex:2}} placeholder="Card name..." value={pull.title} onChange={e=>upd(i,"title",e.target.value)}/>
+                  <input style={{...S.input,flex:1}} placeholder="$" type="number" step="0.01" value={pull.currentValue} onChange={e=>upd(i,"currentValue",e.target.value)}/>
+                  <input style={{...S.input,flex:1.2}} placeholder="Notes" value={pull.notes} onChange={e=>upd(i,"notes",e.target.value)}/>
+                </div>
+              ))}
+            </div>
+            <SubmitBtn onClick={submit}>Confirm & Add Cards</SubmitBtn>
+          </>}
+        </>}
+      </>}
+    </FormWrap>
+  );
+}
+
+// ── Add Single ───────────────────────────────────────────────────────────────
+function AddSingle({cards,saveCards,flash}){
+  const blank={title:"",tcg:"",set:"",rarity:"",faction:"",cardType:"",collectorNumber:"",keywords:"",datePurchased:todayISO(),costPaid:"",location:"",currentValue:"",notes:""};
+  const [form,setForm]=useState(blank);
+  const [query,setQuery]=useState("");
+  const [results,setResults]=useState([]);
+  const [searching,setSearching]=useState(false);
+  const [selected,setSelected]=useState(false);
+  const debounceRef=useRef(null);
+  const f=(k,v)=>setForm(p=>({...p,[k]:v}));
+
+  // Search ApiTCG Riftbound — matches on name or collector number
+  const search=async(q)=>{
+    if(!q||q.length<2){setResults([]);return;}
+    setSearching(true);
+    try{
+      // Try name search first
+      const nameRes=await fetch(`https://apitcg.com/api/riftbound/cards?name=${encodeURIComponent(q)}`);
+      const nameData=await nameRes.json();
+      let hits=(nameData.data||[]);
+      // Also try code/id search if query looks like a number or code (e.g. "032", "SFD-032", "SFD032")
+      if(/^[a-zA-Z0-9\-]+$/.test(q)&&hits.length<5){
+        try{
+          const codeRes=await fetch(`https://apitcg.com/api/riftbound/cards?code=${encodeURIComponent(q)}`);
+          const codeData=await codeRes.json();
+          const codeHits=(codeData.data||[]).filter(c=>!hits.some(h=>h.id===c.id));
+          hits=[...hits,...codeHits];
+        }catch{}
+      }
+      setResults(hits.slice(0,8));
+    }catch{setResults([]);}
+    setSearching(false);
+  };
+
+  const onQueryChange=(v)=>{
+    setQuery(v);
+    setSelected(false);
+    clearTimeout(debounceRef.current);
+    debounceRef.current=setTimeout(()=>search(v),350);
+  };
+
+  const selectCard=(card)=>{
+    // Parse collector number — e.g. id "SFD-032" -> "SFD 032"
+    const rawId=card.id||card.code||"";
+    const collNum=rawId.replace(/-/g," ").toUpperCase();
+    // Build total from set if available e.g. "SFD 032/221"
+    const total=card.set?.total||card.setTotal||"";
+    const displayNum=total?`${collNum}/${total}`:collNum;
+    setForm(p=>({
+      ...p,
+      title:card.name||"",
+      tcg:"Riftbound",
+      set:card.set?.name||card.set||"",
+      rarity:card.rarity||"",
+      faction:card.faction||"",
+      cardType:card.type||"",
+      collectorNumber:displayNum,
+      keywords:(card.keywords||[]).join(", "),
+    }));
+    setQuery(card.name||"");
+    setResults([]);
+    setSelected(true);
+  };
+
+  const submit=()=>{
+    if(!form.title||!form.tcg||!form.costPaid)return;
+    const card={
+      id:uid(),title:form.title,tcg:form.tcg,set:form.set,
+      rarity:form.rarity,faction:form.faction,cardType:form.cardType,
+      collectorNumber:form.collectorNumber,keywords:form.keywords,
+      sourceType:"single",packId:null,packName:null,
+      costBasis:parseFloat(form.costPaid),
+      currentValue:form.currentValue?parseFloat(form.currentValue):null,
+      status:"holding",dateAcquired:form.datePurchased,
+      location:form.location,notes:form.notes
+    };
+    saveCards([card,...cards]);
+    setForm(blank);setQuery("");setSelected(false);setResults([]);
+    flash("Single added!");
+  };
+
+  const rarityColor=(r)=>{
+    if(!r)return"#6b7280";
+    const rl=r.toLowerCase();
+    if(rl.includes("epic"))return"#7c3aed";
+    if(rl.includes("rare"))return"#d97706";
+    if(rl.includes("uncommon"))return"#6b7280";
+    return"#9ca3af";
+  };
+
+  return(
+    <FormWrap title="Add a Single">
+      {/* Riftbound card search */}
+      <FField label="Search Riftbound Card (name or card number)">
+        <div style={{position:"relative"}}>
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <input
+              style={{...S.input,flex:1,borderColor:selected?"#c0000a":"#d1d5db"}}
+              placeholder="e.g. Rek'Sai or SFD 032..."
+              value={query}
+              onChange={e=>onQueryChange(e.target.value)}
+            />
+            {searching&&<span style={{fontSize:12,color:"#9ca3af",flexShrink:0}}>🔍</span>}
+            {selected&&<span style={{fontSize:12,color:"#c0000a",flexShrink:0}}>✓</span>}
+          </div>
+          {results.length>0&&(
+            <div style={{position:"absolute",top:"100%",left:0,right:0,background:"#fff",border:"1px solid #e5e7eb",borderRadius:10,zIndex:200,maxHeight:280,overflowY:"auto",marginTop:4,boxShadow:"0 8px 24px rgba(0,0,0,0.12)"}}>
+              {results.map(card=>(
+                <div key={card.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderBottom:"1px solid #f9f9f9",cursor:"pointer"}}
+                  onMouseDown={()=>selectCard(card)} onTouchEnd={()=>selectCard(card)}>
+                  {card.images?.small&&(
+                    <img src={card.images.small} alt={card.name} style={{width:32,height:44,objectFit:"cover",borderRadius:4,flexShrink:0}} onError={e=>e.target.style.display="none"}/>
+                  )}
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontWeight:700,fontSize:13,color:"#111827",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{card.name}</div>
+                    <div style={{fontSize:11,color:"#9ca3af",marginTop:1,display:"flex",gap:8,flexWrap:"wrap"}}>
+                      <span>{card.set?.name||card.set||""}</span>
+                      {card.rarity&&<span style={{color:rarityColor(card.rarity),fontWeight:600}}>{card.rarity}</span>}
+                      {card.faction&&<span>{card.faction}</span>}
+                    </div>
+                  </div>
+                  <div style={{fontSize:11,color:"#d1d5db",flexShrink:0}}>{(card.id||"").replace(/-/g," ")}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div style={{fontSize:11,color:"#9ca3af",marginTop:4}}>Tap a result to auto-fill. Or skip and fill manually below.</div>
+      </FField>
+
+      {/* Auto-filled metadata preview */}
+      {selected&&(
+        <div style={{...S.allocBox,borderColor:"#c0000a"}}>
+          <div style={S.allocTitle}>Card Metadata</div>
+          <div style={{display:"flex",gap:12,flexWrap:"wrap",fontSize:12,color:"#374151"}}>
+            {form.collectorNumber&&<span>🔢 <b>{form.collectorNumber}</b></span>}
+            {form.rarity&&<span style={{color:rarityColor(form.rarity)}}>◆ <b>{form.rarity}</b></span>}
+            {form.faction&&<span>⚔️ {form.faction}</span>}
+            {form.cardType&&<span>📋 {form.cardType}</span>}
+            {form.keywords&&<span>🏷️ {form.keywords}</span>}
+          </div>
+        </div>
+      )}
+
+      {/* Manual fields */}
+      <FField label="Card Title *">
+        <input style={S.input} placeholder="e.g. Charizard Holo, Rek'Sai..." value={form.title} onChange={e=>f("title",e.target.value)}/>
+      </FField>
+      <Row2>
+        <FField label="TCG *"><Combo value={form.tcg} onChange={v=>f("tcg",v)} options={TCGS} placeholder="TCG..."/></FField>
+        <FField label="Set"><input style={S.input} placeholder="Set name..." value={form.set} onChange={e=>f("set",e.target.value)}/></FField>
+      </Row2>
+      <Row2>
+        <FField label="Collector # (e.g. SFD 032/221)">
+          <input style={S.input} placeholder="SFD 032/221" value={form.collectorNumber} onChange={e=>f("collectorNumber",e.target.value)}/>
+        </FField>
+        <FField label="Rarity">
+          <input style={S.input} placeholder="Common, Rare..." value={form.rarity} onChange={e=>f("rarity",e.target.value)}/>
+        </FField>
+      </Row2>
+      <Row2>
+        <FField label="Date"><input type="date" style={S.input} value={form.datePurchased} onChange={e=>f("datePurchased",e.target.value)}/></FField>
+        <FField label="Location"><input style={S.input} placeholder="eBay, LGS..." value={form.location} onChange={e=>f("location",e.target.value)}/></FField>
+      </Row2>
+      <Row2>
+        <FField label="Cost Paid ($) *"><input type="number" step="0.01" style={S.input} placeholder="0.00" value={form.costPaid} onChange={e=>f("costPaid",e.target.value)}/></FField>
+        <FField label="Est. Value ($)"><input type="number" step="0.01" style={S.input} placeholder="0.00" value={form.currentValue} onChange={e=>f("currentValue",e.target.value)}/></FField>
+      </Row2>
+      <FField label="Notes"><input style={S.input} placeholder="Condition, grade, foil..." value={form.notes} onChange={e=>f("notes",e.target.value)}/></FField>
+      <SubmitBtn onClick={submit} disabled={!form.title||!form.tcg||!form.costPaid}>Add Single</SubmitBtn>
+    </FormWrap>
+  );
+}
+
+// ── Log Sale ─────────────────────────────────────────────────────────────────
+function LogSale({cards,sales,saveCards,saveSales,flash}){
+  const holding=cards.filter(c=>c.status==="holding");
+  const [selId,setSelId]=useState("");
+  const [form,setForm]=useState({dateSold:todayISO(),salePrice:"",platform:"",notes:""});
+  const f=(k,v)=>setForm(p=>({...p,[k]:v}));
+  const sel=cards.find(c=>c.id===selId);
+  const pPL=sel&&form.salePrice?parseFloat(form.salePrice)-sel.costBasis:null;
+  const submit=()=>{
+    if(!sel||!form.salePrice)return;
+    const sale={id:uid(),cardId:sel.id,cardTitle:sel.title,tcg:sel.tcg,set:sel.set,costBasis:sel.costBasis,salePrice:parseFloat(form.salePrice),dateSold:form.dateSold,platform:form.platform,notes:form.notes};
+    saveSales([sale,...sales]);
+    saveCards(cards.map(c=>c.id===sel.id?{...c,status:"sold",dateSold:form.dateSold}:c));
+    setSelId("");setForm({dateSold:todayISO(),salePrice:"",platform:"",notes:""});
+    flash(`Sold! P&L: ${fmt$(pPL)}`,pPL>=0?"#16a34a":"#dc2626");
+  };
+  return(
+    <FormWrap title="Log a Sale">
+      {holding.length===0?<Empty msg="No cards held — add some first!"/>:<>
+        <FField label="Select Card *">
+          <select style={S.input} value={selId} onChange={e=>setSelId(e.target.value)}>
+            <option value="">— choose a card —</option>
+            {holding.map(c=><option key={c.id} value={c.id}>{c.title} · {c.tcg} {c.set} (cost: {fmt$(c.costBasis)})</option>)}
+          </select>
+        </FField>
+        {sel&&<div style={S.allocBox}><div style={S.allocRow}><span>Card: <b>{sel.title}</b></span><span>Cost: <b>{fmt$(sel.costBasis)}</b></span>{sel.sourceType==="pack-pull"&&<span style={{color:"#7c3aed",fontSize:12}}>📦 {sel.packName}</span>}</div></div>}
+        <Row2>
+          <FField label="Sale Price ($) *"><input type="number" step="0.01" style={S.input} placeholder="0.00" value={form.salePrice} onChange={e=>f("salePrice",e.target.value)}/></FField>
+          <FField label="Date Sold"><input type="date" style={S.input} value={form.dateSold} onChange={e=>f("dateSold",e.target.value)}/></FField>
+        </Row2>
+        {pPL!==null&&<div style={{...S.allocBox,borderColor:pPL>=0?"#86efac":"#fca5a5"}}><div style={S.allocRow}><span>Sale: <b>{fmt$(parseFloat(form.salePrice))}</b></span><span>Cost: <b>{fmt$(sel?.costBasis)}</b></span><span>P&L: <b style={{color:clr(pPL),fontSize:16}}>{pPL>=0?"+":""}{fmt$(pPL)}</b></span></div></div>}
+        <Row2>
+          <FField label="Platform"><input style={S.input} placeholder="eBay, TCGPlayer..." value={form.platform} onChange={e=>f("platform",e.target.value)}/></FField>
+          <FField label="Notes"><input style={S.input} placeholder="Notes..." value={form.notes} onChange={e=>f("notes",e.target.value)}/></FField>
+        </Row2>
+        <SubmitBtn onClick={submit} disabled={!selId||!form.salePrice} color="#7c3aed">Record Sale</SubmitBtn>
+      </>}
+    </FormWrap>
+  );
+}
+
+// ── Trends ───────────────────────────────────────────────────────────────────
+function Trends({packs,cards,sales}){
+  const byTCG=useMemo(()=>{
+    const map={};
+    sales.forEach(s=>{
+      const tcg=s.tcg||"Unknown";
+      if(!map[tcg])map[tcg]={revenue:0,cost:0,count:0,bySet:{}};
+      map[tcg].revenue+=s.salePrice;map[tcg].cost+=s.costBasis;map[tcg].count++;
+      const set=s.set||"Unknown";
+      if(!map[tcg].bySet[set])map[tcg].bySet[set]={revenue:0,cost:0,count:0};
+      map[tcg].bySet[set].revenue+=s.salePrice;map[tcg].bySet[set].cost+=s.costBasis;map[tcg].bySet[set].count++;
+    });
+    return map;
+  },[sales]);
+  const packROI=useMemo(()=>packs.filter(p=>p.status==="opened").map(pack=>{
+    const pc=cards.filter(c=>c.packId===pack.id);
+    const sc=pc.filter(c=>c.status==="sold");
+    const ss=sales.filter(s=>sc.some(c=>c.id===s.cardId));
+    const rev=ss.reduce((a,s)=>a+s.salePrice,0);
+    const hv=pc.filter(c=>c.status==="holding").reduce((a,c)=>a+(c.currentValue||c.costBasis),0);
+    return{pack,pc,sc,rev,hv,pl:rev+hv-pack.costPaid};
+  }),[packs,cards,sales]);
+  const byType=useMemo(()=>{
+    const sg=sales.filter(s=>{const c=cards.find(c=>c.id===s.cardId);return c?.sourceType==="single";});
+    const pl=sales.filter(s=>{const c=cards.find(c=>c.id===s.cardId);return c?.sourceType==="pack-pull";});
+    const calc=a=>({revenue:a.reduce((t,s)=>t+s.salePrice,0),cost:a.reduce((t,s)=>t+s.costBasis,0),count:a.length});
+    return{singles:calc(sg),pulls:calc(pl)};
+  },[sales,cards]);
+  if(sales.length===0&&packs.filter(p=>p.status==="opened").length===0)return <Empty msg="Log some sales to see trends!"/>;
+  return(
+    <div>
+      <Section title="Singles vs Pack Pulls">
+        <div style={S.grid2}>
+          <TrendCard label="Singles" data={byType.singles}/>
+          <TrendCard label="Pack Pulls" data={byType.pulls}/>
+        </div>
+      </Section>
+      {Object.keys(byTCG).length>0&&<Section title="P&L by TCG">
+        {Object.entries(byTCG).map(([tcg,data])=>(
+          <div key={tcg} style={S.trendGroup}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <span style={{fontWeight:700,fontSize:14}}>{tcg}</span>
+              <PLBadge pl={data.revenue-data.cost}/>
+            </div>
+            {Object.entries(data.bySet).map(([set,sd])=>(
+              <div key={set} style={{display:"flex",gap:12,alignItems:"center",fontSize:12,color:"#6b7280",paddingTop:6,borderTop:"1px solid #f3f4f6",marginTop:6,flexWrap:"wrap"}}>
+                <span style={{color:"#374151",fontWeight:600}}>{set}</span>
+                <span>{sd.count} sales</span>
+                <span>{fmt$(sd.revenue)} rev</span>
+                <PLBadge pl={sd.revenue-sd.cost} small/>
+              </div>
+            ))}
+          </div>
+        ))}
+      </Section>}
+      {packROI.length>0&&<Section title="Pack ROI">
+        <div style={S.listWrap}>
+          {packROI.map(({pack,pc,sc,rev,hv,pl})=>(
+            <div key={pack.id} style={{...S.row,alignItems:"flex-start"}}>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:14}}>{pack.name}</div>
+                <div style={{fontSize:11,color:"#9ca3af",marginTop:2}}>{pack.tcg} · {pack.set}</div>
+                <div style={{fontSize:12,color:"#6b7280",marginTop:4,display:"flex",gap:12,flexWrap:"wrap"}}>
+                  <span>{pc.length} cards</span><span>{sc.length} sold · {fmt$(rev)}</span><span>held {fmt$(hv)}</span>
+                </div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontSize:11,color:"#9ca3af"}}>cost {fmt$(pack.costPaid)}</div>
+                <PLBadge pl={pl}/>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Section>}
+    </div>
+  );
+}
+
+// ── History ──────────────────────────────────────────────────────────────────
+function History({packs,cards,sales,savePacks,saveCards,saveSales,flash}){
+  const [view,setView]=useState("cards");
+  const delPack=id=>{savePacks(packs.filter(p=>p.id!==id));flash("Deleted","#d97706");};
+  const delCard=id=>{saveCards(cards.filter(c=>c.id!==id));flash("Deleted","#d97706");};
+  const delSale=id=>{saveSales(sales.filter(s=>s.id!==id));flash("Deleted","#d97706");};
+  return(
+    <div>
+      <div style={{display:"flex",gap:8,marginBottom:16}}>
+        {["cards","packs","sales"].map(v=>(
+          <button key={v} style={{...S.typeBtn,...(view===v?S.typeBtnOn:{})}} onClick={()=>setView(v)}>
+            {v==="cards"?`🃏 Cards (${cards.length})`:v==="packs"?`📦 Packs (${packs.length})`:`💰 Sales (${sales.length})`}
+          </button>
+        ))}
+      </div>
+      {view==="cards"&&(cards.length===0?<Empty msg="No cards yet."/>:
+        <div style={S.listWrap}>{cards.map(c=>(
+          <div key={c.id} style={S.row}>
+            <div style={{flex:1}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                <span style={{fontWeight:700,fontSize:13}}>{c.title}</span>
+                <Tag>{c.tcg}</Tag><Tag>{c.set}</Tag>
+                <Tag color={c.status==="holding"?"#dbeafe":c.status==="sold"?"#dcfce7":"#f3f4f6"} tc={c.status==="holding"?"#1d4ed8":c.status==="sold"?"#15803d":"#6b7280"}>{c.status}</Tag>
+              </div>
+              <div style={{fontSize:11,color:"#9ca3af",marginTop:3,display:"flex",gap:10,flexWrap:"wrap"}}>
+                <span>Cost: {fmt$(c.costBasis)}</span>
+                {c.currentValue&&<span>Est: {fmt$(c.currentValue)}</span>}
+                {c.collectorNumber&&<span style={{color:"#6b7280"}}>🔢 {c.collectorNumber}</span>}
+                {c.rarity&&<span style={{color:"#d97706"}}>{c.rarity}</span>}
+                {c.faction&&<span>{c.faction}</span>}
+                {c.sourceType==="pack-pull"&&<span style={{color:"#7c3aed"}}>📦 {c.packName}</span>}
+                <span>{fmtDate(c.dateAcquired)}</span>
+              </div>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-end"}}>
+              <button onClick={()=>openPriceCharting(c.title,c.tcg)} style={S.pcBtn} title="Check PriceCharting">💲</button>
+              <button onClick={()=>delCard(c.id)} style={S.delBtn}>✕</button>
+            </div>
+          </div>
+        ))}</div>
+      )}
+      {view==="packs"&&(packs.length===0?<Empty msg="No packs yet."/>:
+        <div style={S.listWrap}>{packs.map(p=><PackRow key={p.id} p={p} onDelete={()=>delPack(p.id)}/>)}</div>
+      )}
+      {view==="sales"&&(sales.length===0?<Empty msg="No sales yet."/>:
+        <div style={S.listWrap}>{sales.map(s=><SaleRow key={s.id} s={s} cards={cards} onDelete={()=>delSale(s.id)}/>)}</div>
+      )}
+    </div>
+  );
+}
+
+// ── Shared row components ─────────────────────────────────────────────────────
+function PackRow({p,onDelete}){
+  const sPL=p.marketValue?p.marketValue-p.costPaid:null;
+  return(
+    <div style={{...S.row,borderLeftColor:p.status==="sealed"?"#7c3aed":"#d1d5db"}}>
+      <div style={{flex:1}}>
+        <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+          <span style={{fontWeight:700,fontSize:13}}>{p.name}</span>
+          <Tag>{p.tcg}</Tag><Tag>{p.set}</Tag>
+          <Tag color={p.status==="sealed"?"#ede9fe":"#f0fdf4"} tc={p.status==="sealed"?"#7c3aed":"#15803d"}>{p.status==="sealed"?"📦 Sealed":"🔓 Opened"}</Tag>
+        </div>
+        <div style={{fontSize:11,color:"#9ca3af",marginTop:3,display:"flex",gap:10,flexWrap:"wrap"}}>
+          {fmtDate(p.datePurchased)&&<span>{fmtDate(p.datePurchased)}</span>}
+          {p.location&&<span>{p.location}</span>}
+          {p.cardCount&&<span>{p.cardCount} cards</span>}
+          {p.marketValue&&<span>Mkt: {fmt$(p.marketValue)}</span>}
+        </div>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:10}}>
+        <div style={{textAlign:"right"}}>
+          <div style={{fontWeight:700,color:"#c0000a",fontSize:14}}>{fmt$(p.costPaid)}</div>
+          {sPL!==null&&<div style={{fontSize:12,color:clr(sPL)}}>{sPL>=0?"+":""}{fmt$(sPL)}</div>}
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-end"}}>
+          <button onClick={()=>openPriceCharting(p.name,p.tcg)} style={S.pcBtn} title="Check PriceCharting">💲</button>
+          {onDelete&&<button onClick={onDelete} style={S.delBtn}>✕</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+function SaleRow({s,cards,onDelete}){
+  const pl=s.salePrice-s.costBasis;
+  const card=cards?.find(c=>c.id===s.cardId);
+  return(
+    <div style={{...S.row,borderLeftColor:pl>=0?"#16a34a":"#dc2626"}}>
+      <div style={{flex:1}}>
+        <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+          <span style={{fontWeight:700,fontSize:13}}>{s.cardTitle}</span>
+          {s.tcg&&<Tag>{s.tcg}</Tag>}{s.set&&<Tag>{s.set}</Tag>}
+          {card?.sourceType==="pack-pull"&&<Tag color="#f5f3ff" tc="#7c3aed">📦 pull</Tag>}
+        </div>
+        <div style={{fontSize:11,color:"#9ca3af",marginTop:3,display:"flex",gap:10,flexWrap:"wrap"}}>
+          <span>{fmtDate(s.dateSold)}</span>
+          {s.platform&&<span>{s.platform}</span>}
+          <span>sold {fmt$(s.salePrice)} · cost {fmt$(s.costBasis)}</span>
+        </div>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:10}}>
+        <div style={{fontWeight:700,fontSize:15,color:clr(pl)}}>{pl>=0?"+":""}{fmt$(pl)}</div>
+        {onDelete&&<button onClick={onDelete} style={S.delBtn}>✕</button>}
+      </div>
+    </div>
+  );
+}
+
+
+// ── Backups ───────────────────────────────────────────────────────────────────
+function Backups({setPacks,setCards,setSales,flash}){
+  const [backups,setBackups]=useState(()=>lsGet(SK.backups));
+  const [confirming,setConfirming]=useState(null);
+
+  const restore=(snap)=>{
+    setPacks(snap.packs);lsSet(SK.packs,snap.packs);
+    setCards(snap.cards);lsSet(SK.cards,snap.cards);
+    setSales(snap.sales);lsSet(SK.sales,snap.sales);
+    setConfirming(null);
+    flash("Restored from "+fmtDate(snap.date)+"!","#7c3aed");
+  };
+
+  const deleteBackup=(date)=>{
+    const updated=backups.filter(b=>b.date!==date);
+    setBackups(updated);lsSet(SK.backups,updated);
+  };
+
+  if(backups.length===0) return <Empty msg="No backups yet — they appear automatically as you log data."/>;
+
+  return(
+    <div>
+      <Section title={"Auto-Backups ("+backups.length+" of 7 days)"}>
+        <div style={{fontSize:12,color:"#9ca3af",marginBottom:12}}>Snapshots are saved automatically every time you add or change data. Up to 7 daily snapshots are kept.</div>
+        <div style={S.listWrap}>
+          {backups.map(snap=>(
+            <div key={snap.date} style={S.row}>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:14,color:"#111827"}}>📅 {fmtDate(snap.date)}</div>
+                <div style={{fontSize:12,color:"#9ca3af",marginTop:3,display:"flex",gap:12,flexWrap:"wrap"}}>
+                  <span>{snap.packs.length} packs</span>
+                  <span>{snap.cards.length} cards</span>
+                  <span>{snap.sales.length} sales</span>
+                  <span style={{color:"#64748b"}}>{new Date(snap.ts).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>
+                </div>
+              </div>
+              <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                {confirming===snap.date?(
+                  <>
+                    <button onClick={()=>restore(snap)} style={{...S.typeBtn,...S.typeBtnOn,fontSize:12}}>Confirm</button>
+                    <button onClick={()=>setConfirming(null)} style={{...S.typeBtn,fontSize:12}}>Cancel</button>
+                  </>
+                ):(
+                  <>
+                    <button onClick={()=>setConfirming(snap.date)} style={{...S.typeBtn,fontSize:12,color:"#7c3aed",borderColor:"#c4b5fd"}}>Restore</button>
+                    <button onClick={()=>deleteBackup(snap.date)} style={S.delBtn}>✕</button>
+                  </>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Section>
+    </div>
+  );
+}
+
+// ── Small components ──────────────────────────────────────────────────────────
+function TrendCard({label,data}){
+  const pl=data.revenue-data.cost;
+  return(
+    <div style={S.trendCard}>
+      <div style={{fontSize:12,color:"#6b7280",marginBottom:6,fontWeight:600}}>{label}</div>
+      <div style={{fontSize:20,fontWeight:800,color:clr(pl)}}>{pl>=0?"+":""}{fmt$(pl)}</div>
+      <div style={{fontSize:11,color:"#9ca3af",marginTop:4}}>{data.count} sales · {fmt$(data.revenue)} rev</div>
+    </div>
+  );
+}
+function PLBadge({pl,small}){return <span style={{fontWeight:700,fontSize:small?12:14,color:clr(pl)}}>{pl>=0?"+":""}{fmt$(pl)}</span>;}
+function Stat({label,value,dim}){
+  return(
+    <div style={S.stat}>
+      <div style={{fontSize:14,fontWeight:800,color:dim?"#fca5a5":"#fff"}}>{value}</div>
+      <div style={{fontSize:10,color:"rgba(255,255,255,0.6)",marginTop:1}}>{label}</div>
+    </div>
+  );
+}
+function Tag({children,color,tc}){return <span style={{fontSize:10,background:color||"#f3f4f6",color:tc||"#6b7280",borderRadius:5,padding:"2px 6px",fontWeight:500}}>{children}</span>;}
+function Section({title,children}){return <div style={{marginBottom:24}}><div style={S.sectionTitle}>{title}</div>{children}</div>;}
+function FormWrap({title,children}){return <div><div style={S.sectionTitle}>{title}</div><div style={{display:"flex",flexDirection:"column",gap:12}}>{children}</div></div>;}
+function FField({label,children}){return <div style={{display:"flex",flexDirection:"column",gap:4}}><label style={{fontSize:11,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.5px"}}>{label}</label>{children}</div>;}
+function Row2({children}){return <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>{children}</div>;}
+function SubmitBtn({children,onClick,disabled,color}){
+  const bg=color?`linear-gradient(135deg,${color},#4c1d95)`:"linear-gradient(135deg,#c0000a,#7f0006)";
+  return <button onClick={onClick} disabled={disabled} style={{...S.btn,background:bg,opacity:disabled?0.45:1,marginTop:6,boxShadow:"0 2px 12px rgba(192,0,10,0.2)"}}>{children}</button>;
+}
+function Combo({value,onChange,options,placeholder}){
+  const [open,setOpen]=useState(false);
+  const ref=useRef();
+  useEffect(()=>{
+    const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};
+    document.addEventListener("touchstart",h);document.addEventListener("mousedown",h);
+    return()=>{document.removeEventListener("touchstart",h);document.removeEventListener("mousedown",h);};
+  },[]);
+  return(
+    <div ref={ref} style={{position:"relative"}}>
+      <input style={S.input} placeholder={placeholder} value={value} onChange={e=>onChange(e.target.value)} onFocus={()=>setOpen(true)}/>
+      {open&&<div style={S.dropdown}>{options.filter(o=>o.toLowerCase().includes(value.toLowerCase())).map(o=><div key={o} style={S.dropdownItem} onMouseDown={()=>{onChange(o);setOpen(false);}} onTouchEnd={()=>{onChange(o);setOpen(false);}}>{o}</div>)}</div>}
+    </div>
+  );
+}
+function Empty({msg}){return <div style={{color:"#9ca3af",fontSize:13,padding:"28px 0",textAlign:"center"}}>{msg}</div>;}
+
+// ── Styles ────────────────────────────────────────────────────────────────────
+const S={
+  root:{fontFamily:"'DM Sans','Segoe UI',sans-serif",background:"#f9f9f9",minHeight:"100vh",color:"#111827"},
+  header:{background:"linear-gradient(135deg,#c0000a 0%,#7f0006 100%)",padding:"16px 16px 12px",borderBottom:"3px solid #9b0008"},
+  headerInner:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12},
+  brandName:{fontSize:20,fontWeight:900,letterSpacing:"-0.5px",color:"#fff"},
+  brandSub:{fontSize:10,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",letterSpacing:"0.8px"},
+  exportBtn:{background:"rgba(255,255,255,0.18)",border:"1px solid rgba(255,255,255,0.35)",borderRadius:7,color:"#fff",padding:"5px 11px",fontSize:11,fontWeight:700,cursor:"pointer"},
+  statBar:{display:"flex",gap:6,flexWrap:"wrap"},
+  stat:{background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:9,padding:"6px 10px",flex:"1 1 70px"},
+  rail:{background:"#fff",borderBottom:"1px solid #e5e7eb",padding:"8px 16px",display:"flex",alignItems:"center",gap:8,boxShadow:"0 1px 3px rgba(0,0,0,0.05)"},
+  railBtn:{background:"none",border:"1px solid #e5e7eb",borderRadius:7,color:"#6b7280",padding:"5px 12px",fontSize:12,fontWeight:600,cursor:"pointer"},
+  railBtnActive:{background:"#fff1f2",borderColor:"#c0000a",color:"#c0000a"},
+  railSep:{color:"#d1d5db",fontSize:14},
+  railCrumb:{color:"#374151",fontSize:12,fontWeight:600},
+  main:{padding:"16px 16px 0"},
+  sectionTitle:{fontSize:10,fontWeight:800,textTransform:"uppercase",letterSpacing:"1px",color:"#c0000a",marginBottom:10,borderLeft:"3px solid #c0000a",paddingLeft:7},
+  actionGrid:{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8},
+  actionBtn:{background:"#fff",border:"1px solid #e5e7eb",borderRadius:12,padding:"14px 10px",textAlign:"left",cursor:"pointer",boxShadow:"0 1px 3px rgba(0,0,0,0.05)"},
+  grid2:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8},
+  trendCard:{background:"#fff",border:"1px solid #e5e7eb",borderRadius:12,padding:"14px"},
+  trendGroup:{background:"#fff",border:"1px solid #e5e7eb",borderRadius:10,padding:"12px 14px",marginBottom:8},
+  listWrap:{display:"flex",flexDirection:"column",gap:8},
+  row:{background:"#fff",border:"1px solid #e5e7eb",borderRadius:10,padding:"10px 12px",display:"flex",alignItems:"center",gap:10,borderLeft:"3px solid #c0000a",boxShadow:"0 1px 3px rgba(0,0,0,0.04)"},
+  input:{background:"#fff",border:"1px solid #d1d5db",borderRadius:8,padding:"9px 11px",color:"#111827",fontSize:14,outline:"none",width:"100%",boxSizing:"border-box"},
+  typeRow:{display:"flex",gap:6,flexWrap:"wrap"},
+  typeBtn:{padding:"7px 12px",borderRadius:7,border:"1px solid #d1d5db",background:"#fff",color:"#6b7280",cursor:"pointer",fontSize:12,fontWeight:500},
+  typeBtnOn:{background:"#fff1f2",borderColor:"#c0000a",color:"#c0000a",fontWeight:700},
+  btn:{color:"#fff",border:"none",borderRadius:9,padding:"12px 20px",fontWeight:700,fontSize:14,cursor:"pointer",width:"100%"},
+  allocBox:{background:"#fff7f7",border:"1px solid #fecaca",borderRadius:9,padding:"9px 12px"},
+  allocTitle:{fontSize:10,fontWeight:700,color:"#c0000a",textTransform:"uppercase",letterSpacing:"0.5px",marginBottom:5},
+  allocRow:{display:"flex",gap:16,flexWrap:"wrap",fontSize:12,color:"#6b7280"},
+  delBtn:{background:"none",border:"none",color:"#d1d5db",cursor:"pointer",fontSize:14,padding:"4px 6px",borderRadius:5,flexShrink:0},
+  pcBtn:{background:"#fff7f7",border:"1px solid #fecaca",color:"#c0000a",cursor:"pointer",fontSize:12,padding:"3px 7px",borderRadius:6,flexShrink:0,fontWeight:700},
+  dropdown:{position:"absolute",top:"100%",left:0,right:0,background:"#fff",border:"1px solid #d1d5db",borderRadius:8,zIndex:100,maxHeight:160,overflowY:"auto",marginTop:2,boxShadow:"0 4px 16px rgba(0,0,0,0.1)"},
+  dropdownItem:{padding:"10px 12px",cursor:"pointer",fontSize:13,color:"#111827",borderBottom:"1px solid #f9f9f9"},
+};
+
+ReactDOM.render(<App/>, document.getElementById("root"));
+</script>
+</body>
+</html>
