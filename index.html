@@ -17,8 +17,7 @@
   input,select,button{font-family:inherit;font-size:14px;}
   input:focus,select:focus{outline:2px solid #c0000a;outline-offset:1px;}
   /* iOS safe area */
-  .safe-top{padding-top:calc(env(safe-area-inset-top) + 12px);}
-  .safe-top{padding-top:calc(env(safe-area-inset-top) + 16px);}
+  .safe-top{padding-top:max(env(safe-area-inset-top), 59px);}
   .safe-bottom{padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
 </style>
 </head>
