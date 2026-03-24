@@ -131,7 +131,7 @@ function App(){
   const saveSales=useCallback((d,p,c)=>{setSales(d);lsSet(SK.sales,d);takeBackup(p!==undefined?p:packs,c!==undefined?c:cards,d);},[packs,cards]);
 
   const stats=useMemo(()=>{
-    const totalInvested=packs.reduce((a,p)=>a+p.costPaid,0);
+    const totalInvested=packs.reduce((a,p)=>a+p.costPaid,0)+cards.filter(c=>c.sourceType==="single").reduce((a,c)=>a+c.costBasis,0);
     const totalSaleRevenue=sales.reduce((a,s)=>a+s.salePrice,0);
     const totalCostSold=sales.reduce((a,s)=>a+s.costBasis,0);
     const realizedPL=totalSaleRevenue-totalCostSold;
@@ -149,7 +149,7 @@ function App(){
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <span style={{fontSize:26}}>🃏</span>
             <div>
-              <div style={S.brandName}>CardVault <span style={{fontSize:11,fontWeight:500,opacity:0.7}}>v1.5.0</span></div>
+              <div style={S.brandName}>CardVault <span style={{fontSize:11,fontWeight:500,opacity:0.7}}>v1.5.1</span></div>
               <div style={S.brandSub}>TCG Collection Tracker</div>
             </div>
           </div>
@@ -748,8 +748,8 @@ function SyncValues({packs,cards,savePacks,saveCards,flash}){
     const sealedPacks=packs.filter(p=>p.status==="sealed");
     const holdingCards=cards.filter(c=>c.status==="holding"&&c.title);
     const items=[
-      ...sealedPacks.map(p=>({type:"pack",id:p.id,name:p.name,tcg:p.tcg})),
-      ...holdingCards.map(c=>({type:"card",id:c.id,name:c.title,tcg:c.tcg})),
+      ...sealedPacks.map(p=>({type:"pack",id:p.id,name:p.name,tcg:p.tcg,set:p.set||""})),
+      ...holdingCards.map(c=>({type:"card",id:c.id,name:c.title,tcg:c.tcg,set:c.set||"",collectorNumber:c.collectorNumber||""})),
     ];
     if(items.length===0){flash("Nothing to sync — add some packs or cards first.","#d97706");return;}
     setSyncing(true);setLog([]);setProgress(0);setTotal(items.length);
@@ -768,12 +768,17 @@ function SyncValues({packs,cards,savePacks,saveCards,flash}){
           body:JSON.stringify({
             model:"claude-sonnet-4-20250514",max_tokens:200,
             tools:[{type:"web_search_20250305",name:"web_search"}],
-            messages:[{role:"user",content:`What is the current market price for "${item.name}" ${item.tcg} ${item.type==="pack"?"sealed pack":"card"}? Search and return ONLY JSON: {"price":7.99,"source":"site name"}. No other text.`}]
+            messages:[{role:"user",content:item.type==="pack"
+              ?`Search PriceCharting for the current sealed booster pack price of "${item.name}" from the ${item.tcg} set "${item.set}". The PriceCharting URL pattern is pricecharting.com/game/[set-slug]/[pack-slug]. Find the actual page and return ONLY JSON with no other text: {"price":7.99,"source":"pricecharting.com","url":"full url"}`
+              :item.collectorNumber
+                ?`Search PriceCharting for TCG card with collector number "${item.collectorNumber}" from the ${item.tcg} set "${item.set||item.name}". This is the most precise identifier. Return ONLY JSON: {"price":7.99,"name":"exact card name","source":"pricecharting.com"}`
+                :`Search PriceCharting for the current ungraded market price of the ${item.tcg} card "${item.name}" from set "${item.set||""}". Return ONLY JSON: {"price":7.99,"source":"pricecharting.com"}`
+            }]
           })
         });
         const data=await res.json();
         const text=(data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("");
-        const match=text.match(/\{[^}]+\}/);
+        const match=text.match(/\{[\s\S]*?\}/);
         if(match){
           const parsed=JSON.parse(match[0]);
           if(parsed.price&&parsed.price>0){
