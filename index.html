@@ -77,8 +77,28 @@ function openPriceCharting(name, tcg){
   window.open(`https://www.pricecharting.com/search-products?q=${q}&type=prices&genre=${game}`, "_blank");
 }
 
+
+// ── Import JSON backup ────────────────────────────────────────────────────────
+function importJSON(onSuccess){
+  const input=document.createElement("input");
+  input.type="file";input.accept=".json";
+  input.onchange=e=>{
+    const file=e.target.files[0];if(!file)return;
+    const reader=new FileReader();
+    reader.onload=evt=>{
+      try{
+        const data=JSON.parse(evt.target.result);
+        if(!data.packs||!data.cards||!data.sales){alert("Invalid CardVault backup file.");return;}
+        onSuccess(data);
+      }catch{alert("Could not read file. Make sure it's a CardVault JSON export.");}
+    };
+    reader.readAsText(file);
+  };
+  input.click();
+}
+
 // ── Tab config ───────────────────────────────────────────────────────────────
-const ACTION_TABS=["Add Pack","Open Pack","Add Single","Log Sale","Trends","History","Backups"];
+const ACTION_TABS=["Add Pack","Open Pack","Add Single","Log Sale","Trends","History","Sync Values","Backups"];
 const TAB_META={
   "Add Pack":{icon:"📦",desc:"Log a new sealed or opened pack"},
   "Open Pack":{icon:"🔓",desc:"Rip a sealed pack & log pulls"},
@@ -86,6 +106,7 @@ const TAB_META={
   "Log Sale":{icon:"💰",desc:"Record a card sale & P&L"},
   "Trends":{icon:"📈",desc:"P&L by TCG, set & pack"},
   "History":{icon:"🗂️",desc:"Browse all cards, packs & sales"},
+  "Sync Values":{icon:"🔄",desc:"Update collection market values"},
   "Backups":{icon:"💾",desc:"Auto-saved daily snapshots"},
 
 };
@@ -99,6 +120,12 @@ function App(){
   const [toast,setToast]=useState(null);
 
   const flash=(msg,color="#16a34a")=>{setToast({msg,color});setTimeout(()=>setToast(null),2500);};
+  const handleImport=()=>importJSON(data=>{
+    setPacks(data.packs);lsSet(SK.packs,data.packs);
+    setCards(data.cards);lsSet(SK.cards,data.cards);
+    setSales(data.sales);lsSet(SK.sales,data.sales);
+    flash(`Restored! ${data.packs.length} packs, ${data.cards.length} cards, ${data.sales.length} sales.`,"#7c3aed");
+  });
   const savePacks=useCallback((d,c,s)=>{setPacks(d);lsSet(SK.packs,d);takeBackup(d,c!==undefined?c:cards,s!==undefined?s:sales);},[cards,sales]);
   const saveCards=useCallback((d,p,s)=>{setCards(d);lsSet(SK.cards,d);takeBackup(p!==undefined?p:packs,d,s!==undefined?s:sales);},[packs,sales]);
   const saveSales=useCallback((d,p,c)=>{setSales(d);lsSet(SK.sales,d);takeBackup(p!==undefined?p:packs,c!==undefined?c:cards,d);},[packs,cards]);
@@ -117,18 +144,19 @@ function App(){
   return(
     <div style={S.root}>
       {/* Red header */}
-      <div style={S.header} className="safe-top">
+      <div style={S.header}>
         <div style={S.headerInner}>
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <span style={{fontSize:26}}>🃏</span>
             <div>
-              <div style={S.brandName}>CardVault <span style={{fontSize:11,fontWeight:500,opacity:0.7}}>v1.4.0</span></div>
+              <div style={S.brandName}>CardVault <span style={{fontSize:11,fontWeight:500,opacity:0.7}}>v1.5.0</span></div>
               <div style={S.brandSub}>TCG Collection Tracker</div>
             </div>
           </div>
           <div style={{display:"flex",gap:6}}>
             <button style={S.exportBtn} onClick={()=>exportCSV(packs,cards,sales)}>↓ CSV</button>
             <button style={S.exportBtn} onClick={()=>exportJSON(packs,cards,sales)}>↓ JSON</button>
+            <button style={{...S.exportBtn,background:"rgba(255,255,255,0.3)",border:"1px solid rgba(255,255,255,0.5)"}} onClick={handleImport}>↑ Import</button>
           </div>
         </div>
         <div style={S.statBar}>
@@ -158,6 +186,7 @@ function App(){
         {tab==="Log Sale"&&<LogSale cards={cards} sales={sales} saveCards={saveCards} saveSales={saveSales} flash={flash}/>}
         {tab==="Trends"&&<Trends packs={packs} cards={cards} sales={sales}/>}
         {tab==="History"&&<History packs={packs} cards={cards} sales={sales} savePacks={savePacks} saveCards={saveCards} saveSales={saveSales} flash={flash}/>}
+        {tab==="Sync Values"&&<SyncValues packs={packs} cards={cards} savePacks={savePacks} saveCards={saveCards} flash={flash}/>}
         {tab==="Backups"&&<Backups setPacks={setPacks} setCards={setCards} setSales={setSales} flash={flash}/>}
       </div>
     </div>
@@ -300,7 +329,7 @@ function OpenPack({packs,cards,savePacks,saveCards,flash}){
 
 // ── Add Single ───────────────────────────────────────────────────────────────
 function AddSingle({cards,saveCards,flash}){
-  const blank={title:"",tcg:"",set:"",rarity:"",faction:"",cardType:"",collectorNumber:"",keywords:"",datePurchased:todayISO(),costPaid:"",location:"",currentValue:"",notes:""};
+  const blank={title:"",tcg:"",set:"",rarity:"",collectorNumber:"",currentValue:"",datePurchased:todayISO(),costPaid:"",location:"",notes:""};
   const [form,setForm]=useState(blank);
   const [query,setQuery]=useState("");
   const [results,setResults]=useState([]);
@@ -309,53 +338,55 @@ function AddSingle({cards,saveCards,flash}){
   const debounceRef=useRef(null);
   const f=(k,v)=>setForm(p=>({...p,[k]:v}));
 
-  // Search ApiTCG Riftbound — matches on name or collector number
+  // Search via Claude API + web search — works for ALL TCGs, no CORS issues
   const search=async(q)=>{
     if(!q||q.length<2){setResults([]);return;}
     setSearching(true);
     try{
-      // Try name search first
-      const nameRes=await fetch(`https://apitcg.com/api/riftbound/cards?name=${encodeURIComponent(q)}`);
-      const nameData=await nameRes.json();
-      let hits=(nameData.data||[]);
-      // Also try code/id search if query looks like a number or code (e.g. "032", "SFD-032", "SFD032")
-      if(/^[a-zA-Z0-9\-]+$/.test(q)&&hits.length<5){
-        try{
-          const codeRes=await fetch(`https://apitcg.com/api/riftbound/cards?code=${encodeURIComponent(q)}`);
-          const codeData=await codeRes.json();
-          const codeHits=(codeData.data||[]).filter(c=>!hits.some(h=>h.id===c.id));
-          hits=[...hits,...codeHits];
-        }catch{}
+      const res=await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          model:"claude-sonnet-4-20250514",max_tokens:800,
+          tools:[{type:"web_search_20250305",name:"web_search"}],
+          messages:[{role:"user",content:`Search PriceCharting for the TCG card "${q}". Find up to 5 matching cards. Return ONLY a JSON array, no other text, no markdown:
+[{"name":"Card Name","tcg":"Pokemon","set":"Base Set","rarity":"Rare Holo","collectorNumber":"4/102","price":125.00}]
+Rules: tcg must be one of: Pokemon, Riftbound, Magic: The Gathering, One Piece, Lorcana, Yu-Gi-Oh!, Sports, Other. price is the current ungraded market price in USD as a number. collectorNumber is the card number like "032/221" or "4/102". Return empty array [] if nothing found.`}]
+        })
+      });
+      const data=await res.json();
+      const text=(data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("");
+      // Extract JSON array from response
+      const match=text.match(/\[[\s\S]*\]/);
+      if(match){
+        const parsed=JSON.parse(match[0]);
+        setResults(Array.isArray(parsed)?parsed.slice(0,5):[]);
+      } else {
+        setResults([]);
       }
-      setResults(hits.slice(0,8));
-    }catch{setResults([]);}
+    }catch(e){
+      console.error("Search error:",e);
+      setResults([]);
+    }
     setSearching(false);
   };
 
   const onQueryChange=(v)=>{
     setQuery(v);
     setSelected(false);
+    if(results.length>0)setResults([]);
     clearTimeout(debounceRef.current);
-    debounceRef.current=setTimeout(()=>search(v),350);
+    debounceRef.current=setTimeout(()=>search(v),600);
   };
 
   const selectCard=(card)=>{
-    // Parse collector number — e.g. id "SFD-032" -> "SFD 032"
-    const rawId=card.id||card.code||"";
-    const collNum=rawId.replace(/-/g," ").toUpperCase();
-    // Build total from set if available e.g. "SFD 032/221"
-    const total=card.set?.total||card.setTotal||"";
-    const displayNum=total?`${collNum}/${total}`:collNum;
     setForm(p=>({
       ...p,
       title:card.name||"",
-      tcg:"Riftbound",
-      set:card.set?.name||card.set||"",
+      tcg:card.tcg||"",
+      set:card.set||"",
       rarity:card.rarity||"",
-      faction:card.faction||"",
-      cardType:card.type||"",
-      collectorNumber:displayNum,
-      keywords:(card.keywords||[]).join(", "),
+      collectorNumber:card.collectorNumber||"",
+      currentValue:card.price?String(card.price):"",
     }));
     setQuery(card.name||"");
     setResults([]);
@@ -366,8 +397,7 @@ function AddSingle({cards,saveCards,flash}){
     if(!form.title||!form.tcg||!form.costPaid)return;
     const card={
       id:uid(),title:form.title,tcg:form.tcg,set:form.set,
-      rarity:form.rarity,faction:form.faction,cardType:form.cardType,
-      collectorNumber:form.collectorNumber,keywords:form.keywords,
+      rarity:form.rarity,collectorNumber:form.collectorNumber,
       sourceType:"single",packId:null,packName:null,
       costBasis:parseFloat(form.costPaid),
       currentValue:form.currentValue?parseFloat(form.currentValue):null,
@@ -382,7 +412,7 @@ function AddSingle({cards,saveCards,flash}){
   const rarityColor=(r)=>{
     if(!r)return"#6b7280";
     const rl=r.toLowerCase();
-    if(rl.includes("epic"))return"#7c3aed";
+    if(rl.includes("epic")||rl.includes("secret")||rl.includes("hyper"))return"#7c3aed";
     if(rl.includes("rare"))return"#d97706";
     if(rl.includes("uncommon"))return"#6b7280";
     return"#9ca3af";
@@ -390,83 +420,88 @@ function AddSingle({cards,saveCards,flash}){
 
   return(
     <FormWrap title="Add a Single">
-      {/* Riftbound card search */}
-      <FField label="Search Riftbound Card (name or card number)">
+
+      {/* Universal card search */}
+      <FField label="Search Any TCG Card">
         <div style={{position:"relative"}}>
           <div style={{display:"flex",gap:6,alignItems:"center"}}>
             <input
               style={{...S.input,flex:1,borderColor:selected?"#c0000a":"#d1d5db"}}
-              placeholder="e.g. Rek'Sai or SFD 032..."
+              placeholder="Card name or number — e.g. Charizard, SFD 032, LeBron..."
               value={query}
               onChange={e=>onQueryChange(e.target.value)}
             />
-            {searching&&<span style={{fontSize:12,color:"#9ca3af",flexShrink:0}}>🔍</span>}
-            {selected&&<span style={{fontSize:12,color:"#c0000a",flexShrink:0}}>✓</span>}
+            {searching&&<span style={{fontSize:18,flexShrink:0,animation:"spin 1s linear infinite",display:"inline-block"}}>⏳</span>}
+            {selected&&!searching&&<span style={{fontSize:14,color:"#c0000a",flexShrink:0,fontWeight:700}}>✓</span>}
           </div>
+
           {results.length>0&&(
-            <div style={{position:"absolute",top:"100%",left:0,right:0,background:"#fff",border:"1px solid #e5e7eb",borderRadius:10,zIndex:200,maxHeight:280,overflowY:"auto",marginTop:4,boxShadow:"0 8px 24px rgba(0,0,0,0.12)"}}>
-              {results.map(card=>(
-                <div key={card.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderBottom:"1px solid #f9f9f9",cursor:"pointer"}}
-                  onMouseDown={()=>selectCard(card)} onTouchEnd={()=>selectCard(card)}>
-                  {card.images?.small&&(
-                    <img src={card.images.small} alt={card.name} style={{width:32,height:44,objectFit:"cover",borderRadius:4,flexShrink:0}} onError={e=>e.target.style.display="none"}/>
-                  )}
+            <div style={{position:"absolute",top:"100%",left:0,right:0,background:"#fff",border:"1px solid #e5e7eb",borderRadius:10,zIndex:200,maxHeight:300,overflowY:"auto",marginTop:4,boxShadow:"0 8px 24px rgba(0,0,0,0.15)"}}>
+              {results.map((card,i)=>(
+                <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"11px 14px",borderBottom:"1px solid #f9f9f9",cursor:"pointer",background:"#fff"}}
+                  onMouseDown={()=>selectCard(card)} onTouchEnd={(e)=>{e.preventDefault();selectCard(card);}}>
+                  <div style={{width:28,height:28,background:"#fff1f2",borderRadius:6,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0}}>
+                    {card.tcg==="Pokemon"?"🔴":card.tcg==="Riftbound"?"⚔️":card.tcg==="Magic: The Gathering"?"🌀":card.tcg==="Sports"?"🏀":"🃏"}
+                  </div>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontWeight:700,fontSize:13,color:"#111827",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{card.name}</div>
                     <div style={{fontSize:11,color:"#9ca3af",marginTop:1,display:"flex",gap:8,flexWrap:"wrap"}}>
-                      <span>{card.set?.name||card.set||""}</span>
-                      {card.rarity&&<span style={{color:rarityColor(card.rarity),fontWeight:600}}>{card.rarity}</span>}
-                      {card.faction&&<span>{card.faction}</span>}
+                      <span>{card.tcg}</span>
+                      {card.set&&<span>· {card.set}</span>}
+                      {card.rarity&&<span style={{color:rarityColor(card.rarity),fontWeight:600}}>· {card.rarity}</span>}
+                      {card.collectorNumber&&<span>· #{card.collectorNumber}</span>}
                     </div>
                   </div>
-                  <div style={{fontSize:11,color:"#d1d5db",flexShrink:0}}>{(card.id||"").replace(/-/g," ")}</div>
+                  {card.price&&<div style={{fontWeight:700,fontSize:13,color:"#16a34a",flexShrink:0}}>{fmt$(card.price)}</div>}
                 </div>
               ))}
             </div>
           )}
         </div>
-        <div style={{fontSize:11,color:"#9ca3af",marginTop:4}}>Tap a result to auto-fill. Or skip and fill manually below.</div>
+        <div style={{fontSize:11,color:"#9ca3af",marginTop:4}}>
+          Searches PriceCharting across all TCGs. Takes ~5 seconds. Tap a result to auto-fill.
+        </div>
       </FField>
 
-      {/* Auto-filled metadata preview */}
+      {/* Metadata preview after selection */}
       {selected&&(
         <div style={{...S.allocBox,borderColor:"#c0000a"}}>
-          <div style={S.allocTitle}>Card Metadata</div>
+          <div style={S.allocTitle}>Auto-filled from PriceCharting</div>
           <div style={{display:"flex",gap:12,flexWrap:"wrap",fontSize:12,color:"#374151"}}>
-            {form.collectorNumber&&<span>🔢 <b>{form.collectorNumber}</b></span>}
+            {form.tcg&&<span>🃏 <b>{form.tcg}</b></span>}
+            {form.set&&<span>📦 {form.set}</span>}
+            {form.collectorNumber&&<span>🔢 {form.collectorNumber}</span>}
             {form.rarity&&<span style={{color:rarityColor(form.rarity)}}>◆ <b>{form.rarity}</b></span>}
-            {form.faction&&<span>⚔️ {form.faction}</span>}
-            {form.cardType&&<span>📋 {form.cardType}</span>}
-            {form.keywords&&<span>🏷️ {form.keywords}</span>}
+            {form.currentValue&&<span style={{color:"#16a34a"}}>💲 {fmt$(parseFloat(form.currentValue))} market</span>}
           </div>
         </div>
       )}
 
-      {/* Manual fields */}
+      {/* Manual fields — always editable */}
       <FField label="Card Title *">
-        <input style={S.input} placeholder="e.g. Charizard Holo, Rek'Sai..." value={form.title} onChange={e=>f("title",e.target.value)}/>
+        <input style={S.input} placeholder="e.g. Charizard Holo, Rek'Sai, LeBron Rookie..." value={form.title} onChange={e=>f("title",e.target.value)}/>
       </FField>
       <Row2>
         <FField label="TCG *"><Combo value={form.tcg} onChange={v=>f("tcg",v)} options={TCGS} placeholder="TCG..."/></FField>
         <FField label="Set"><input style={S.input} placeholder="Set name..." value={form.set} onChange={e=>f("set",e.target.value)}/></FField>
       </Row2>
       <Row2>
-        <FField label="Collector # (e.g. SFD 032/221)">
-          <input style={S.input} placeholder="SFD 032/221" value={form.collectorNumber} onChange={e=>f("collectorNumber",e.target.value)}/>
+        <FField label="Collector # (e.g. 032/221)">
+          <input style={S.input} placeholder="032/221" value={form.collectorNumber} onChange={e=>f("collectorNumber",e.target.value)}/>
         </FField>
         <FField label="Rarity">
-          <input style={S.input} placeholder="Common, Rare..." value={form.rarity} onChange={e=>f("rarity",e.target.value)}/>
+          <input style={S.input} placeholder="Common, Rare Holo..." value={form.rarity} onChange={e=>f("rarity",e.target.value)}/>
         </FField>
       </Row2>
       <Row2>
-        <FField label="Date"><input type="date" style={S.input} value={form.datePurchased} onChange={e=>f("datePurchased",e.target.value)}/></FField>
-        <FField label="Location"><input style={S.input} placeholder="eBay, LGS..." value={form.location} onChange={e=>f("location",e.target.value)}/></FField>
+        <FField label="Date Purchased"><input type="date" style={S.input} value={form.datePurchased} onChange={e=>f("datePurchased",e.target.value)}/></FField>
+        <FField label="Location"><input style={S.input} placeholder="eBay, LGS, Target..." value={form.location} onChange={e=>f("location",e.target.value)}/></FField>
       </Row2>
       <Row2>
         <FField label="Cost Paid ($) *"><input type="number" step="0.01" style={S.input} placeholder="0.00" value={form.costPaid} onChange={e=>f("costPaid",e.target.value)}/></FField>
-        <FField label="Est. Value ($)"><input type="number" step="0.01" style={S.input} placeholder="0.00" value={form.currentValue} onChange={e=>f("currentValue",e.target.value)}/></FField>
+        <FField label="Est. Market Value ($)"><input type="number" step="0.01" style={S.input} placeholder="0.00" value={form.currentValue} onChange={e=>f("currentValue",e.target.value)}/></FField>
       </Row2>
-      <FField label="Notes"><input style={S.input} placeholder="Condition, grade, foil..." value={form.notes} onChange={e=>f("notes",e.target.value)}/></FField>
+      <FField label="Notes"><input style={S.input} placeholder="Condition, grade, foil, variant..." value={form.notes} onChange={e=>f("notes",e.target.value)}/></FField>
       <SubmitBtn onClick={submit} disabled={!form.title||!form.tcg||!form.costPaid}>Add Single</SubmitBtn>
     </FormWrap>
   );
@@ -699,6 +734,121 @@ function SaleRow({s,cards,onDelete}){
 }
 
 
+
+// ── Sync Values ───────────────────────────────────────────────────────────────
+function SyncValues({packs,cards,savePacks,saveCards,flash}){
+  const [syncing,setSyncing]=useState(false);
+  const [log,setLog]=useState([]);
+  const [progress,setProgress]=useState(0);
+  const [total,setTotal]=useState(0);
+
+  const addLog=(msg,color="#374151")=>setLog(prev=>[{msg,color,id:uid()},...prev].slice(0,30));
+
+  const syncAll=async()=>{
+    const sealedPacks=packs.filter(p=>p.status==="sealed");
+    const holdingCards=cards.filter(c=>c.status==="holding"&&c.title);
+    const items=[
+      ...sealedPacks.map(p=>({type:"pack",id:p.id,name:p.name,tcg:p.tcg})),
+      ...holdingCards.map(c=>({type:"card",id:c.id,name:c.title,tcg:c.tcg})),
+    ];
+    if(items.length===0){flash("Nothing to sync — add some packs or cards first.","#d97706");return;}
+    setSyncing(true);setLog([]);setProgress(0);setTotal(items.length);
+    addLog(`Starting sync for ${items.length} items...`,"#7c3aed");
+
+    let updatedPacks=[...packs];
+    let updatedCards=[...cards];
+
+    for(let i=0;i<items.length;i++){
+      const item=items[i];
+      setProgress(i+1);
+      addLog(`Searching: ${item.name}`,"#9ca3af");
+      try{
+        const res=await fetch("https://api.anthropic.com/v1/messages",{
+          method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({
+            model:"claude-sonnet-4-20250514",max_tokens:200,
+            tools:[{type:"web_search_20250305",name:"web_search"}],
+            messages:[{role:"user",content:`What is the current market price for "${item.name}" ${item.tcg} ${item.type==="pack"?"sealed pack":"card"}? Search and return ONLY JSON: {"price":7.99,"source":"site name"}. No other text.`}]
+          })
+        });
+        const data=await res.json();
+        const text=(data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("");
+        const match=text.match(/\{[^}]+\}/);
+        if(match){
+          const parsed=JSON.parse(match[0]);
+          if(parsed.price&&parsed.price>0){
+            const p=parsed.price;
+            if(item.type==="pack"){
+              updatedPacks=updatedPacks.map(pk=>pk.id===item.id?{...pk,marketValue:p}:pk);
+              addLog(`✓ ${item.name}: ${fmt$(p)} (${parsed.source||"web"})`, "#16a34a");
+            } else {
+              updatedCards=updatedCards.map(c=>c.id===item.id?{...c,currentValue:p}:c);
+              addLog(`✓ ${item.name}: ${fmt$(p)} (${parsed.source||"web"})`, "#16a34a");
+            }
+          } else {
+            addLog(`— ${item.name}: no price found`,"#d97706");
+          }
+        } else {
+          addLog(`— ${item.name}: no result`,"#d97706");
+        }
+      }catch{
+        addLog(`✗ ${item.name}: error`,"#dc2626");
+      }
+      // Small delay to avoid hammering the API
+      await new Promise(r=>setTimeout(r,800));
+    }
+
+    savePacks(updatedPacks);
+    saveCards(updatedCards);
+    setSyncing(false);
+    addLog(`Sync complete — ${items.length} items processed.`,"#7c3aed");
+    flash("Collection values updated!","#16a34a");
+  };
+
+  const sealedCount=packs.filter(p=>p.status==="sealed").length;
+  const holdingCount=cards.filter(c=>c.status==="holding"&&c.title).length;
+
+  return(
+    <div>
+      <Section title="Collection Value Sync">
+        <div style={{...S.allocBox,marginBottom:16}}>
+          <div style={S.allocTitle}>What gets synced</div>
+          <div style={S.allocRow}>
+            <span>📦 <b>{sealedCount}</b> sealed packs</span>
+            <span>🃏 <b>{holdingCount}</b> cards held</span>
+          </div>
+          <div style={{fontSize:11,color:"#9ca3af",marginTop:8,lineHeight:1.5}}>
+            Uses web search to find current market prices and updates the estimated value on each item. One search per item — larger collections take a few minutes.
+          </div>
+        </div>
+
+        <button
+          style={{...S.btn,background:syncing?"#9ca3af":"linear-gradient(135deg,#c0000a,#7f0006)",boxShadow:"0 2px 12px rgba(192,0,10,0.2)",marginBottom:16,opacity:syncing?0.7:1}}
+          onClick={syncAll}
+          disabled={syncing}
+        >
+          {syncing?`🔄 Syncing... (${progress}/${total})`:"🔄 Sync All Values Now"}
+        </button>
+
+        {syncing&&(
+          <div style={{background:"#f3f4f6",borderRadius:8,height:8,marginBottom:16,overflow:"hidden"}}>
+            <div style={{background:"#c0000a",height:"100%",width:`${total>0?(progress/total)*100:0}%`,transition:"width 0.3s"}}/>
+          </div>
+        )}
+
+        {log.length>0&&(
+          <div style={{background:"#f9f9f9",border:"1px solid #e5e7eb",borderRadius:10,padding:"10px 12px",maxHeight:300,overflowY:"auto"}}>
+            <div style={{fontSize:10,fontWeight:700,color:"#9ca3af",textTransform:"uppercase",letterSpacing:"0.5px",marginBottom:8}}>Sync Log</div>
+            {log.map(l=>(
+              <div key={l.id} style={{fontSize:12,color:l.color,padding:"2px 0",borderBottom:"1px solid #f3f4f6"}}>{l.msg}</div>
+            ))}
+          </div>
+        )}
+      </Section>
+    </div>
+  );
+}
+
 // ── Backups ───────────────────────────────────────────────────────────────────
 function Backups({setPacks,setCards,setSales,flash}){
   const [backups,setBackups]=useState(()=>lsGet(SK.backups));
@@ -805,7 +955,7 @@ function Empty({msg}){return <div style={{color:"#9ca3af",fontSize:13,padding:"2
 // ── Styles ────────────────────────────────────────────────────────────────────
 const S={
   root:{fontFamily:"'DM Sans','Segoe UI',sans-serif",background:"#f9f9f9",minHeight:"100vh",color:"#111827"},
-  header:{background:"linear-gradient(135deg,#c0000a 0%,#7f0006 100%)",padding:"16px 16px 12px",borderBottom:"3px solid #9b0008"},
+  header:{background:"linear-gradient(135deg,#c0000a 0%,#7f0006 100%)",padding:"59px 16px 12px",borderBottom:"3px solid #9b0008"},
   headerInner:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12},
   brandName:{fontSize:20,fontWeight:900,letterSpacing:"-0.5px",color:"#fff"},
   brandSub:{fontSize:10,color:"rgba(255,255,255,0.6)",textTransform:"uppercase",letterSpacing:"0.8px"},
